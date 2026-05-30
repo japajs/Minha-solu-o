@@ -1,175 +1,227 @@
-/* Animações suaves */
+/* =====================================================
+   PULSO — index.css
+   Estilos customizados (Tailwind CDN cuida do resto)
+   ===================================================== */
+
+/* --- ANIMAÇÕES DE ENTRADA --- */
 .fade-in {
-    animation: fadeIn 0.3s ease-in-out;
+    animation: fadeIn 0.25s ease-out;
 }
 
 @keyframes fadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0);  }
 }
 
-/* Utilitário para esconder elementos */
-.hidden-section {
-    display: none;
-}
-
-/* --- ESTILOS DE IMPRESSÃO --- */
-@media print {
-    /* Esconde tudo que não for a área de impressão */
-    body * {
-        visibility: hidden;
-    }
-
-    /* Esconde elementos de navegação e interativos */
-    nav,
-    button,
-    input,
-    select,
-    .no-print {
-        display: none !important;
-    }
-
-    /* Mostra e posiciona a área de relatório */
-    #print-area,
-    #print-area * {
-        visibility: visible;
-    }
-
-    #print-area {
-        position: absolute;
-        left: 0;
-        top: 0;
-        width: 100%;
-        display: block !important; /* Força exibição */
-        background: white;
-        color: black;
-    }
-
-    /* Remove sombras e fundos coloridos para economizar tinta */
-    .shadow-md,
-    .shadow-lg {
-        box-shadow: none !important;
-        border: 1px solid #ccc;
-    }
-}
-
-/* --- ANIMAÇÕES DE UI --- */
-
+/* --- SHAKE (login incorreto) --- */
 @keyframes shake {
-    0%,
-    100% {
-        transform: translateX(0);
-    }
-    25% {
-        transform: translateX(-8px);
-    }
-    75% {
-        transform: translateX(8px);
-    }
+    0%, 100% { transform: translateX(0);  }
+    25%       { transform: translateX(-7px); }
+    75%       { transform: translateX(7px);  }
 }
 
 .shake {
-    animation: shake 0.3s ease-in-out;
-    border-color: #ef4444 !important; /* Vermelho (Tailwind red-500) */
+    animation: shake 0.28s ease-in-out;
+    border-color: #ef4444 !important;
 }
 
-/* Pulsação para alerta de estoque baixo */
+/* --- PULSAÇÃO: alerta de estoque baixo --- */
 @keyframes pulse-warning {
-    0%,
-    100% {
-        opacity: 1;
-        transform: scale(1);
-    }
-    50% {
-        opacity: 0.6;
-        transform: scale(1.2);
-    }
+    0%, 100% { opacity: 1; transform: scale(1);   }
+    50%       { opacity: 0.6; transform: scale(1.2); }
 }
 
 .pulse-warning {
     display: inline-block;
     animation: pulse-warning 1.4s ease-in-out infinite;
-    color: #f59e0b; /* amber-500 */
+    color: #f59e0b;
 }
 
-/* Card de caixa — linha de detalhe (bruto/retirado) */
-.cash-detail-row {
-    display: flex;
-    gap: 1rem;
-    font-size: 0.72rem;
-    color: #9ca3af;
-    margin-top: 0.15rem;
+/* =====================================================
+   TAB NAVIGATION
+   ===================================================== */
+.tab-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.875rem 1.25rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #6b7280;           /* gray-500 */
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+    background: transparent;
+    cursor: pointer;
 }
 
-.cash-detail-row .withdrawn {
-    color: #f87171; /* red-400 */
+.tab-nav-btn:hover {
+    color: #374151;            /* gray-700 */
+    border-bottom-color: #d1d5db; /* gray-300 */
+}
+
+.tab-nav-btn.tab-active {
+    color: #4f46e5;            /* indigo-600 */
+    border-bottom-color: #4f46e5;
     font-weight: 600;
 }
 
-/* Seção de gráficos — altura fixa dos canvas */
+/* =====================================================
+   COMPONENTES DE CARD / LAYOUT
+   ===================================================== */
+
+/* Card genérico (KPI e conteúdo) */
+.kpi-card {
+    background: white;
+    border-radius: 0.75rem;
+    border: 1px solid #e5e7eb;   /* gray-200 */
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+    padding: 1.25rem;
+    transition: box-shadow 0.15s ease;
+}
+
+.kpi-card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,.08);
+}
+
+/* Ícone do KPI */
+.kpi-icon {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+/* Label do KPI */
+.kpi-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9ca3af;             /* gray-400 */
+}
+
+/* Card de conteúdo (tabelas, seções) */
+.content-card {
+    background: white;
+    border-radius: 0.75rem;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+}
+
+/* Cabeçalho de seção de conteúdo */
+.content-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    padding: 0.875rem 1.25rem;
+    border-bottom: 1px solid #f3f4f6;  /* gray-100 */
+    background-color: #f9fafb;          /* gray-50 */
+    border-radius: 0.75rem 0.75rem 0 0;
+}
+
+/* Título de seção */
+.section-title {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #374151;
+    display: flex;
+    align-items: center;
+}
+
+/* Cabeçalho de seção de Settings */
+.settings-section-header {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1.25rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6b7280;
+    background-color: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+/* Cabeçalho de tabela */
+.table-th {
+    padding: 0.625rem 1.25rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #6b7280;
+}
+
+/* Campos de formulário */
+.field-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #6b7280;
+    margin-bottom: 0.25rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.field-input {
+    width: 100%;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    background: white;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.field-input:focus {
+    border-color: #818cf8;         /* indigo-400 */
+    box-shadow: 0 0 0 2px rgba(99,102,241,0.15);
+}
+
+/* =====================================================
+   LAYOUT DO CARD DE CAIXA — linha bruto/retirado
+   ===================================================== */
+.cash-detail-row {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.7rem;
+    color: #9ca3af;
+    margin-top: 0.2rem;
+}
+
+.cash-detail-row .withdrawn {
+    color: #f87171;
+    font-weight: 600;
+}
+
+/* =====================================================
+   GRÁFICOS
+   ===================================================== */
 .chart-wrapper {
     position: relative;
     height: 220px;
 }
 
-/* --- RESPONSIVIDADE EXTRA --- */
-
-/* Navbar: encolhe o título em telas muito pequenas */
-@media (max-width: 380px) {
-    nav h1 {
-        font-size: 0.95rem;
-    }
-    nav .fa-ticket {
-        font-size: 1.1rem;
-    }
-}
-
-/* Tabela de funcionários: reduz padding e fonte em mobile */
-@media (max-width: 640px) {
-    #manager-table-body td,
-    #history-table-body td {
-        padding-left: 0.6rem;
-        padding-right: 0.6rem;
-        font-size: 0.8rem;
-    }
-
-    /* Cabeçalho das tabelas menor em mobile */
-    table thead th {
-        padding-left: 0.6rem;
-        padding-right: 0.6rem;
-        font-size: 0.7rem;
-    }
-}
-
-/* Modal: garante que não ultrapasse a tela em altura */
-@media (max-width: 640px) {
-    .modal-inner {
-        max-height: 90vh;
-        overflow-y: auto;
-    }
-}
-
-/* Gráficos: reduz altura em telas muito pequenas */
 @media (max-width: 480px) {
-    .chart-wrapper {
-        height: 180px;
-    }
+    .chart-wrapper { height: 180px; }
 }
 
-/* --- TOAST NOTIFICATIONS --- */
-
+/* =====================================================
+   TOAST NOTIFICATIONS
+   ===================================================== */
 .toast-item {
     opacity: 0;
     transform: translateX(110%);
-    transition:
-        opacity 0.3s ease,
-        transform 0.3s ease;
+    transition: opacity 0.28s ease, transform 0.28s ease;
 }
 
 .toast-item.toast-visible {
@@ -182,46 +234,165 @@
     transform: translateX(110%);
 }
 
-/* --- MODO ESCURO (DARK MODE) --- */
+/* =====================================================
+   IMPRESSÃO
+   ===================================================== */
+@media print {
+    body * { visibility: hidden; }
+
+    nav, button, input, select, .no-print { display: none !important; }
+
+    #print-area,
+    #print-area * { visibility: visible; }
+
+    #print-area {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        display: block !important;
+        background: white;
+        color: black;
+    }
+
+    .shadow-md, .shadow-lg, .shadow-sm {
+        box-shadow: none !important;
+        border: 1px solid #ccc;
+    }
+}
+
+/* =====================================================
+   RESPONSIVIDADE EXTRA
+   ===================================================== */
+@media (max-width: 380px) {
+    .tab-nav-btn { padding: 0.75rem 0.6rem; font-size: 0.72rem; }
+    .tab-nav-btn i { display: none; }
+}
+
+@media (max-width: 640px) {
+    #manager-table-body td,
+    #history-table-body td {
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+        font-size: 0.8rem;
+    }
+
+    .table-th {
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+}
+
+/* =====================================================
+   MODO ESCURO (DARK MODE)
+   ===================================================== */
 body.dark-mode {
-    background-color: #111827; /* gray-900 */
-    color: #f3f4f6; /* gray-100 */
+    background-color: #0f172a;   /* slate-900 */
+    color: #e2e8f0;
 }
 
-/* Inverter cartões brancos para cinza escuro */
-body.dark-mode .bg-white {
-    background-color: #1f2937; /* gray-800 */
-    color: #e5e7eb;
-    border-color: #374151;
+/* Navbar */
+body.dark-mode nav {
+    background-color: #1e293b;   /* slate-800 */
+    border-bottom-color: #334155;
 }
 
-/* Ajustar fundos cinzas claros */
+/* Cards e conteúdo branco */
+body.dark-mode .bg-white,
+body.dark-mode .kpi-card,
+body.dark-mode .content-card {
+    background-color: #1e293b;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+/* Fundo cinza claro → cinza escuro */
 body.dark-mode .bg-gray-50,
-body.dark-mode .bg-gray-100 {
-    background-color: #374151; /* gray-700 */
-    color: #e5e7eb;
-    border-color: #4b5563;
+body.dark-mode .bg-gray-100,
+body.dark-mode .content-card-header,
+body.dark-mode .settings-section-header {
+    background-color: #273549;
+    border-color: #334155;
+    color: #94a3b8;
 }
 
-/* Ajustar Inputs e Selects */
+/* Tab nav */
+body.dark-mode .tab-nav-btn {
+    color: #94a3b8;
+}
+body.dark-mode .tab-nav-btn:hover {
+    color: #e2e8f0;
+    border-bottom-color: #475569;
+}
+body.dark-mode .tab-nav-btn.tab-active {
+    color: #818cf8;
+    border-bottom-color: #818cf8;
+}
+
+/* Inputs e Selects */
 body.dark-mode input,
-body.dark-mode select {
-    background-color: #374151;
-    border-color: #4b5563;
-    color: white;
+body.dark-mode select,
+body.dark-mode .field-input {
+    background-color: #273549;
+    border-color: #475569;
+    color: #e2e8f0;
 }
 
-/* Ajustar textos que eram cinza escuro */
+body.dark-mode input::placeholder,
+body.dark-mode select::placeholder {
+    color: #64748b;
+}
+
+/* Textos */
+body.dark-mode .text-gray-400,
 body.dark-mode .text-gray-500,
+body.dark-mode .kpi-label {
+    color: #64748b;
+}
+
 body.dark-mode .text-gray-600,
 body.dark-mode .text-gray-700,
 body.dark-mode .text-gray-800,
 body.dark-mode .text-gray-900 {
-    color: #d1d5db; /* gray-300 */
+    color: #cbd5e1;
 }
 
-/* Garantir que botões coloridos mantenham texto branco */
+/* Divisores */
+body.dark-mode .divide-y > * + *,
+body.dark-mode .border-t,
+body.dark-mode .border-b,
+body.dark-mode .border {
+    border-color: #334155;
+}
+
+/* Botões coloridos mantêm cor branca */
 body.dark-mode button[class*="text-white"] {
     color: white !important;
 }
 
+/* Footer */
+body.dark-mode footer {
+    background-color: #1e293b;
+    border-color: #334155;
+    color: #475569;
+}
+
+/* Modais */
+body.dark-mode .bg-white.rounded-xl {
+    background-color: #1e293b;
+    border-color: #334155;
+}
+
+/* Zona de Risco — manter destaque visual no dark mode */
+body.dark-mode .border-red-200 {
+    border-color: #7f1d1d !important;
+}
+
+body.dark-mode .bg-red-50 {
+    background-color: #2d1515 !important;
+}
+
+/* Fundo slate-50 → slate-900 no dark mode */
+body.dark-mode .bg-slate-50 {
+    background-color: #0f172a;
+}
