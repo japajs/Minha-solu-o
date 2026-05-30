@@ -97,11 +97,11 @@
 
 /* Label do KPI */
 .kpi-label {
-    font-size: 0.65rem;
+    font-size: 0.7rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: #9ca3af;             /* gray-400 */
+    color: #6b7280;             /* gray-500 — contraste 4.6:1 em fundo branco (WCAG AA) */
 }
 
 /* Card de conteúdo (tabelas, seções) */
@@ -153,7 +153,7 @@
 /* Cabeçalho de tabela */
 .table-th {
     padding: 0.625rem 1.25rem;
-    font-size: 0.65rem;
+    font-size: 0.7rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -194,7 +194,7 @@
     display: flex;
     gap: 1rem;
     font-size: 0.7rem;
-    color: #9ca3af;
+    color: #6b7280;             /* gray-500 — contraste WCAG AA */
     margin-top: 0.2rem;
 }
 
@@ -213,6 +213,14 @@
 
 @media (max-width: 480px) {
     .chart-wrapper { height: 180px; }
+}
+
+@media (min-width: 768px) {
+    .chart-wrapper { height: 250px; }
+}
+
+@media (min-width: 1024px) {
+    .chart-wrapper { height: 300px; }
 }
 
 /* =====================================================
@@ -238,6 +246,7 @@
    IMPRESSÃO
    ===================================================== */
 @media print {
+    @page { margin: 1.5cm; size: A4 portrait; }
     body * { visibility: hidden; }
 
     nav, button, input, select, .no-print { display: none !important; }
@@ -395,4 +404,24 @@ body.dark-mode .bg-red-50 {
 /* Fundo slate-50 → slate-900 no dark mode */
 body.dark-mode .bg-slate-50 {
     background-color: #0f172a;
+}
+
+/* =====================================================
+   TOUCH TARGETS — mínimo 44×44px (WCAG 2.5.5)
+   ===================================================== */
+nav > div > div:last-child button,
+.kpi-card button,
+.content-card-header button,
+.content-card-header label {
+    min-height: 44px;
+    min-width: 44px;
+}
+
+/* Safe-area para dispositivos com notch/home indicator */
+#toast-container {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+nav {
+    padding-top: env(safe-area-inset-top, 0px);
 }
