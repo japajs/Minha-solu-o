@@ -10,7 +10,7 @@
 */
 
 // --- CONFIGURAÇÃO E ESTADO ---
-const SYSTEM_PASSWORD = "1234"; // SENHA DE ACESSO
+const SYSTEM_PASSWORD = "1234"; // Senha padrão — usada apenas se appState.systemPassword ainda não existir
 const STORAGE_KEY = "pulso_app_v1"; // Chave para dados antigos em localStorage (para migração)
 
 // --- INDEXEDDB (idb UMD - Biblioteca externa) ---
@@ -39,13 +39,263 @@ let appState = {
 
 // Variáveis de Paginação (para o histórico)
 let currentPage = 1;
-const ITEMS_PER_PAGE = 5;
+const ITEMS_PER_PAGE = 15;
 
 // Instâncias dos gráficos Chart.js (necessário para destruir antes de recriar)
 let chartInstances = {};
 
 // Mapa temporário para agendamentos removidos (para a função "Desfazer")
 const pendingScheduleRemovals = new Map();
+
+// --- PROTEÇÃO CONTRA DUPLO CLIQUE / OPERAÇÕES CONCORRENTES ---
+let _operationInProgress = false;
+function _acquireLock() {
+  if (_operationInProgress) return false;
+  _operationInProgress = true;
+  return true;
+}
+function _releaseLock() {
+  _operationInProgress = false;
+}
+
+// --- PROTEÇÃO CONTRA MÚLTIPLAS ABAS ---
+// Duas abas abertas simultâneas corrompem o estado: cada aba tem seu próprio
+// appState em memória e a última a salvar sobrescreve a outra silenciosamente.
+// Esta função bloqueia a segunda aba antes que qualquer operação seja realizada.
+
+const _TAB_LS_KEY       = "pulso_active_tab";
+const _TAB_HEARTBEAT_MS = 2000;  // atualiza presença a cada 2s
+const _TAB_STALE_MS     = 5000;  // aba é considerada encerrada após 5s sem heartbeat
+
+let _myTabId       = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+let _heartbeatTimer = null;
+let _tabChannel     = null;
+
+function _readTabRecord() {
+  try { return JSON.parse(localStorage.getItem(_TAB_LS_KEY)); }
+  catch (_) { return null; }
+}
+
+function _writeTabRecord() {
+  localStorage.setItem(_TAB_LS_KEY, JSON.stringify({ id: _myTabId, ts: Date.now() }));
+}
+
+function _showDuplicateTabOverlay() {
+  const overlay = document.createElement("div");
+  overlay.id = "duplicate-tab-overlay";
+  overlay.style.cssText = [
+    "position:fixed;inset:0;z-index:9999;",
+    "background:#0f172a;display:flex;align-items:center;justify-content:center;padding:1.5rem;",
+  ].join("");
+  overlay.innerHTML = `
+    <div style="text-align:center;color:#f8fafc;max-width:420px;">
+      <div style="font-size:2.5rem;margin-bottom:1rem;color:#f59e0b;">&#9888;</div>
+      <h2 style="font-size:1.125rem;font-weight:700;margin-bottom:0.5rem;">
+        Sistema já está aberto em outra aba
+      </h2>
+      <p style="color:#94a3b8;line-height:1.6;margin-bottom:0.5rem;font-size:0.875rem;">
+        Manter duas abas abertas simultaneamente pode causar
+        <strong style="color:#f87171;">perda de dados e inconsistência no estoque</strong>.
+      </p>
+      <p style="color:#64748b;font-size:0.75rem;margin-bottom:1.5rem;">
+        Feche a outra aba e recarregue esta página para continuar.
+      </p>
+      <button
+        onclick="location.reload()"
+        style="background:#4f46e5;color:white;padding:0.625rem 1.5rem;border-radius:0.5rem;border:none;cursor:pointer;font-size:0.875rem;font-weight:600;"
+      >
+        Usar esta aba
+      </button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+function initTabGuard() {
+  // 1. Verifica se já existe outra aba com heartbeat recente
+  const existing = _readTabRecord();
+  if (existing && existing.id !== _myTabId && Date.now() - existing.ts < _TAB_STALE_MS) {
+    _showDuplicateTabOverlay();
+    return; // não registra heartbeat — esta aba está bloqueada
+  }
+
+  // 2. Registra presença e inicia heartbeat
+  _writeTabRecord();
+  _heartbeatTimer = setInterval(_writeTabRecord, _TAB_HEARTBEAT_MS);
+
+  // 3. BroadcastChannel: detecta outra aba abrindo APÓS esta
+  if (window.BroadcastChannel) {
+    _tabChannel = new BroadcastChannel("pulso_v1");
+    // Anuncia presença para abas já abertas
+    _tabChannel.postMessage({ type: "tab_opened", id: _myTabId });
+    _tabChannel.onmessage = (e) => {
+      if (e.data.type === "tab_opened" && e.data.id !== _myTabId) {
+        // Outra aba acabou de abrir — avisa, mas não bloqueia (a outra aba se bloqueará)
+        showToast(
+          "Atenção: o sistema foi aberto em outra aba. Feche-a imediatamente para evitar perda de dados.",
+          "warning"
+        );
+      }
+    };
+  }
+
+  // 4. StorageEvent: fallback para navegadores sem BroadcastChannel
+  window.addEventListener("storage", (e) => {
+    if (e.key !== _TAB_LS_KEY || !e.newValue) return;
+    try {
+      const d = JSON.parse(e.newValue);
+      if (d.id !== _myTabId) {
+        showToast(
+          "Atenção: o sistema foi aberto em outra aba. Feche-a para evitar inconsistências.",
+          "warning"
+        );
+      }
+    } catch (_) {}
+  });
+
+  // 5. Libera o lock ao fechar a aba
+  window.addEventListener("beforeunload", () => {
+    clearInterval(_heartbeatTimer);
+    _tabChannel?.close();
+    const current = _readTabRecord();
+    if (current?.id === _myTabId) localStorage.removeItem(_TAB_LS_KEY);
+  });
+}
+
+// --- IDs ÚNICOS PARA LOGS ---
+// Combina timestamp com sequencial para evitar colisão em operações no mesmo ms
+let _logSeq = 0;
+function nextLogId() {
+  return Date.now() * 1000 + (_logSeq++ % 1000);
+}
+
+// --- ACESSORES DE ESTOQUE E SALDO DE OPERADOR ---
+// Centralizam o mapeamento tipo → campo, eliminando blocos if/else repetidos.
+// Retrocompatíveis: leem/escrevem nos mesmos campos do appState de sempre.
+
+const STOCK_FIELD   = { sales: "centralStock", owner: "stockOwner",    dayUser: "stockDayUser"   };
+const BALANCE_FIELD = { sales: "received",     owner: "receivedOwner", dayUser: "receivedDayUser" };
+
+function getStockByType(type)         { return appState[STOCK_FIELD[type]] ?? 0; }
+function setStockByType(type, value)  { appState[STOCK_FIELD[type]] = value; }
+function addStockByType(type, delta)  { setStockByType(type, getStockByType(type) + delta); }
+
+function getEmpBalance(emp, type)         { return emp[BALANCE_FIELD[type]] ?? 0; }
+function setEmpBalance(emp, type, value)  { emp[BALANCE_FIELD[type]] = value; }
+function addEmpBalance(emp, type, delta)  { setEmpBalance(emp, type, getEmpBalance(emp, type) + delta); }
+
+// --- CAMADA DE VALIDAÇÃO ---
+// Funções puras que retornam null (ok) ou string de erro. Sem efeitos colaterais.
+
+const Validation = {
+  canAdjust(type, delta) {
+    if (!Number.isInteger(delta) || delta === 0)   return "Informe uma quantidade válida.";
+    if (!appState.bandConfig[type])                return "Tipo de pulseira inválido.";
+    if (getStockByType(type) + delta < 0)          return "A correção não pode deixar o estoque negativo.";
+    return null;
+  },
+
+  canDistribute(type, amount, empId) {
+    if (!Number.isInteger(amount) || amount <= 0)  return "Quantidade inválida.";
+    if (!appState.bandConfig[type])                return "Tipo de pulseira inválido.";
+    if (!appState.employees.find(e => e.id === empId)) return "Funcionário não encontrado.";
+    if (getStockByType(type) < amount)
+      return `Estoque de ${appState.bandConfig[type].name} insuficiente (disponível: ${getStockByType(type)}).`;
+    return null;
+  },
+
+  canSettle(snapshot, returns) {
+    for (const type of ["sales", "owner", "dayUser"]) {
+      const ret = returns[type] ?? 0;
+      if (!Number.isInteger(ret) || ret < 0)       return "Quantidade de devolução inválida.";
+      if (ret > snapshot[type])                    return "Verifique as quantidades de devolução. Não podem ser maiores que o recebido.";
+    }
+    return null;
+  },
+};
+
+// --- SERVIÇO DE ESTOQUE ---
+// Toda a lógica de negócio fica aqui: sem DOM, sem UI, sem salvar.
+// Os handlers chamam o serviço e tratam erros com showToast.
+
+const StockService = {
+
+  adjust(type, delta) {
+    const error = Validation.canAdjust(type, delta);
+    if (error) throw new Error(error);
+    addStockByType(type, delta);
+    addStockLog(type, delta, delta > 0 ? "Entrada Manual" : "Ajuste Manual", "Via Configurações");
+  },
+
+  distribute(type, empId, amount) {
+    const error = Validation.canDistribute(type, amount, empId);
+    if (error) throw new Error(error);
+    const employee = appState.employees.find(e => e.id === empId);
+    addStockByType(type, -amount);
+    addEmpBalance(employee, type, amount);
+    addStockLog(type, -amount, "Distribuição", `Entregue para ${employee.name}`, empId);
+    return employee;
+  },
+
+  collect(empId) {
+    const employee = appState.employees.find(e => e.id === empId);
+    if (!employee) throw new Error("Funcionário não encontrado.");
+    for (const type of ["sales", "owner", "dayUser"]) {
+      const qty = getEmpBalance(employee, type);
+      if (qty > 0) {
+        addStockByType(type, qty);
+        setEmpBalance(employee, type, 0);
+        addStockLog(type, qty, "Recolhimento", `Devolvido por ${employee.name}`, empId);
+      }
+    }
+    return employee;
+  },
+
+  settle(employee, snapshot, returns) {
+    // Rejeita se o saldo mudou desde a abertura do modal (distribuição concorrente)
+    for (const type of ["sales", "owner", "dayUser"]) {
+      if (getEmpBalance(employee, type) !== snapshot[type]) {
+        throw new Error(
+          "O saldo deste funcionário foi alterado desde a abertura do acerto. Feche e reabra o modal."
+        );
+      }
+    }
+
+    const error = Validation.canSettle(snapshot, returns);
+    if (error) throw new Error(error);
+
+    const soldCount = snapshot.sales - returns.sales;
+    const moneyDue  = soldCount * appState.pricePerUnit;
+
+    appState.totalCash = (appState.totalCash || 0) + moneyDue;
+    setEmpBalance(employee, "sales",   returns.sales);
+    setEmpBalance(employee, "owner",   returns.owner);
+    setEmpBalance(employee, "dayUser", returns.dayUser);
+
+    return { soldCount, moneyDue };
+  },
+};
+
+// --- VERIFICAÇÃO DE INTEGRIDADE ---
+// Detecta saldos negativos no startup e loga no console. Não altera dados.
+
+function verifyStockIntegrity() {
+  const issues = [];
+  for (const type of ["sales", "owner", "dayUser"]) {
+    const qty = getStockByType(type);
+    if (qty < 0) issues.push(`Estoque central de "${appState.bandConfig[type]?.name}" negativo: ${qty}`);
+  }
+  for (const emp of appState.employees) {
+    for (const type of ["sales", "owner", "dayUser"]) {
+      const bal = getEmpBalance(emp, type);
+      if (bal < 0) issues.push(`Saldo negativo: ${emp.name} / ${appState.bandConfig[type]?.name}: ${bal}`);
+    }
+  }
+  if (issues.length > 0) {
+    console.warn("[Pulso] Inconsistências detectadas:\n" + issues.join("\n"));
+  }
+  return issues;
+}
 
 // --- CAMADA DE ACESSO AO INDEXEDDB (utiliza a biblioteca idb) ---
 
@@ -92,14 +342,20 @@ async function saveToDB() {
     await db.put(DB_STORE, appState, "current");
   } catch (err) {
     console.error("[IndexedDB] Falha ao salvar dados:", err);
-    // Fallback de emergência: grava em localStorage se IndexedDB falhar
+    // Fallback de emergência: tenta localStorage e avisa o usuário
     try {
-      localStorage.setItem(
-        STORAGE_KEY + "_emergency",
-        JSON.stringify(appState),
+      localStorage.setItem(STORAGE_KEY + "_emergency", JSON.stringify(appState));
+      // Avisa visualmente — o usuário precisa saber que o armazenamento principal falhou
+      showToast(
+        "Falha no armazenamento principal (IndexedDB). Dados salvos temporariamente. Faça um backup agora.",
+        "warning"
       );
     } catch (e) {
-      console.warn("[IndexedDB] Falha no fallback para localStorage:", e);
+      console.error("[IndexedDB] Falha TOTAL — nenhum armazenamento disponível:", e);
+      // Re-lança para que os handlers (confirmSettle, etc.) possam capturar e informar o usuário
+      throw new Error(
+        "Falha crítica ao salvar dados: armazenamento indisponível. Faça um backup e recarregue a página."
+      );
     }
   }
 }
@@ -124,6 +380,17 @@ async function migrateFromLocalStorage() {
 }
 
 // --- UTILITÁRIOS DE DATA ---
+
+/**
+ * Converte timestamp (ms) para o formato "YYYY-MM-DDTHH:MM" do datetime-local.
+ * Elimina a necessidade de armazenar scheduleDate junto com scheduleTs.
+ */
+function tsToDatetimeLocal(ts) {
+  if (!ts) return "";
+  const d   = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 /**
  * Faz parsing robusto de uma string vinda de <input type="datetime-local"> ("YYYY-MM-DDTHH:MM").
@@ -186,8 +453,8 @@ async function init() {
   if (appState.pricePerUnit === undefined) appState.pricePerUnit = 15.0;
   if (appState.stockOwner === undefined) appState.stockOwner = 0;
   if (appState.stockDayUser === undefined) appState.stockDayUser = 0;
-  if (appState.stockAlertThreshold === undefined)
-    appState.stockAlertThreshold = 20;
+  if (appState.stockAlertThreshold === undefined) appState.stockAlertThreshold = 20;
+  if (!appState.systemPassword) appState.systemPassword = SYSTEM_PASSWORD;
 
   // Garante a configuração de bandas, caso não exista
   if (!appState.bandConfig) {
@@ -198,16 +465,17 @@ async function init() {
     };
   }
 
-  // Migração: se existir scheduleDate mas não scheduleTs, preencha scheduleTs
-  // E também inicializa o campo 'phone' para funcionários existentes, se não tiver
+  // Migração: garante que todos os campos dos funcionários existam,
+  // inclusive em backups gerados por versões anteriores do sistema.
   appState.employees.forEach((emp) => {
     if (emp && emp.scheduleDate && !emp.scheduleTs) {
       const dtParsed = parseDatetimeLocal(emp.scheduleDate);
       if (dtParsed) emp.scheduleTs = dtParsed.ts;
     }
-    if (emp && emp.phone === undefined) {
-      emp.phone = ""; // Inicializa o campo de telefone como string vazia
-    }
+    if (emp && emp.phone === undefined) emp.phone = "";
+    // Garante saldo de pulseiras zerado para tipos adicionados após o cadastro
+    if (emp && emp.receivedOwner  === undefined) emp.receivedOwner  = 0;
+    if (emp && emp.receivedDayUser === undefined) emp.receivedDayUser = 0;
   });
 
   // Configurar event listeners
@@ -313,7 +581,9 @@ async function init() {
   const yearSpan = document.getElementById("current-year");
   if (yearSpan) yearSpan.innerText = new Date().getFullYear();
 
-  renderAll(); // Renderiza a UI inicial
+  initTabGuard();        // Bloqueia segunda aba antes de qualquer operação
+  verifyStockIntegrity(); // Detecta saldos negativos após migração; loga no console
+  renderAll();
 }
 
 // --- TEMA (DARK MODE) ---
@@ -335,10 +605,33 @@ function updateThemeIcon() {
 }
 
 // --- AUTENTICAÇÃO ---
+
+// Controle de tentativas de login (lockout progressivo)
+const _MAX_LOGIN_ATTEMPTS = 5;
+const _LOCKOUT_MS = 30000; // 30 segundos
+
+function _getLoginAttempts() {
+  return parseInt(sessionStorage.getItem("_la") || "0", 10);
+}
+function _getLockoutEnd() {
+  return parseInt(sessionStorage.getItem("_le") || "0", 10);
+}
+function _recordFailedLogin() {
+  const n = _getLoginAttempts() + 1;
+  sessionStorage.setItem("_la", String(n));
+  if (n >= _MAX_LOGIN_ATTEMPTS) {
+    sessionStorage.setItem("_le", String(Date.now() + _LOCKOUT_MS));
+  }
+}
+function _resetLoginAttempts() {
+  sessionStorage.removeItem("_la");
+  sessionStorage.removeItem("_le");
+}
+
 /**
  * Tenta fazer login com a senha fornecida.
  * Exibe feedback visual e de texto para senha incorreta.
- * Impede envios múltiplos.
+ * Bloqueia por 30s após 5 tentativas erradas consecutivas.
  */
 function attemptLogin() {
   const input = document.getElementById("login-password");
@@ -348,6 +641,33 @@ function attemptLogin() {
   const errorEl = document.getElementById("login-error");
   if (!input || !btn) return;
 
+  // Verifica lockout ativo antes de qualquer processamento
+  const lockoutEnd = _getLockoutEnd();
+  if (lockoutEnd > Date.now()) {
+    const secsLeft = Math.ceil((lockoutEnd - Date.now()) / 1000);
+    if (errorEl) {
+      errorEl.textContent = `Muitas tentativas incorretas. Aguarde ${secsLeft}s para tentar novamente.`;
+      errorEl.classList.remove("hidden");
+    }
+    input.classList.add("shake");
+    setTimeout(() => input.classList.remove("shake"), 300);
+    return;
+  }
+
+  // Campo vazio não conta como tentativa — apenas avisa o usuário
+  if (!input.value) {
+    if (errorEl) {
+      errorEl.textContent = "Digite a senha para continuar.";
+      errorEl.classList.remove("hidden");
+      setTimeout(() => {
+        errorEl.textContent = "";
+        errorEl.classList.add("hidden");
+      }, 3000);
+    }
+    input.focus();
+    return;
+  }
+
   if (btn.disabled) return; // Impede envios múltiplos
   btn.disabled = true;
   btn.classList.add("opacity-50", "cursor-not-allowed");
@@ -356,7 +676,8 @@ function attemptLogin() {
 
   // Pequeno delay para que o estado do botão seja renderizado antes da checagem
   setTimeout(() => {
-    if (input.value === SYSTEM_PASSWORD) {
+    if (input.value === (appState.systemPassword || SYSTEM_PASSWORD)) {
+      _resetLoginAttempts(); // Limpa contador de falhas ao acertar
       sessionStorage.setItem("isLoggedIn", "true");
       if (errorEl) {
         errorEl.textContent = "";
@@ -365,8 +686,17 @@ function attemptLogin() {
       input.value = ""; // Limpa o campo de senha
       showManagerView();
     } else {
+      _recordFailedLogin();
+      const attemptsUsed = _getLoginAttempts();
+      const remaining = _MAX_LOGIN_ATTEMPTS - attemptsUsed;
+      const isLocked = remaining <= 0;
+
+      const msg = isLocked
+        ? `Acesso bloqueado por ${_LOCKOUT_MS / 1000}s após ${_MAX_LOGIN_ATTEMPTS} tentativas incorretas.`
+        : `Senha incorreta. ${remaining} tentativa(s) restante(s).`;
+
       if (errorEl) {
-        errorEl.textContent = "Senha incorreta.";
+        errorEl.textContent = msg;
         errorEl.classList.remove("hidden");
       }
       input.classList.add("shake"); // Animação de "tremida"
@@ -375,13 +705,15 @@ function attemptLogin() {
       input.value = ""; // Limpa o campo de senha
       input.focus(); // Retorna o foco para o campo de senha
 
-      // Limpa a mensagem de erro após alguns segundos
-      setTimeout(() => {
-        if (errorEl) {
-          errorEl.textContent = "";
-          errorEl.classList.add("hidden");
-        }
-      }, 3000);
+      // Limpa a mensagem de erro após alguns segundos (apenas se não for lockout)
+      if (!isLocked) {
+        setTimeout(() => {
+          if (errorEl) {
+            errorEl.textContent = "";
+            errorEl.classList.add("hidden");
+          }
+        }, 3000);
+      }
     }
 
     // Restaura o botão ao estado original
@@ -393,6 +725,8 @@ function attemptLogin() {
 
 function logout() {
   sessionStorage.removeItem("isLoggedIn");
+  // Os contadores de tentativa de login (_la, _le) são preservados intencionalmente.
+  // Removê-los aqui permitiria resetar o lockout via logout — o que anularia a proteção.
   showLoginView();
 }
 
@@ -403,6 +737,33 @@ function showManagerView() {
   if (vLogin) vLogin.classList.add("hidden");
   if (vManager) vManager.classList.remove("hidden");
   if (navLogout) navLogout.classList.remove("hidden");
+  showTab("dashboard"); // Sempre retorna ao Dashboard ao logar
+  // Avisa sobre backup atrasado uma vez por sessão (com delay para a UI estar pronta)
+  setTimeout(checkBackupWarning, 800);
+}
+
+/**
+ * Exibe aviso de backup se o último backup foi há mais de 3 dias (ou nunca foi feito).
+ * Mostra apenas uma vez por sessão para não ser invasivo.
+ */
+function checkBackupWarning() {
+  if (sessionStorage.getItem("_bwShown")) return; // Já mostrou nesta sessão
+
+  const hasData = appState.history.length > 0 || appState.employees.length > 0;
+  if (!hasData) return; // Sem dados, sem aviso
+
+  const lastBackup = parseInt(localStorage.getItem("lastBackup") || "0", 10);
+  const THREE_DAYS_MS = 7 * 24 * 60 * 60 * 1000; // Avisa após 7 dias sem backup
+
+  if (lastBackup > 0 && (Date.now() - lastBackup) < THREE_DAYS_MS) return; // Backup recente
+
+  sessionStorage.setItem("_bwShown", "1"); // Marca como mostrado nesta sessão
+
+  const diasStr = lastBackup === 0
+    ? "Nenhum backup realizado ainda"
+    : `Último backup há ${Math.floor((Date.now() - lastBackup) / 86400000)} dia(s)`;
+
+  showToast(`${diasStr}. Recomendamos salvar seus dados.`, "warning", "Fazer Backup", exportData);
 }
 
 function showLoginView() {
@@ -414,9 +775,17 @@ function showLoginView() {
   if (navLogout) navLogout.classList.add("hidden");
 }
 
-function saveData() {
-  renderAll(); // Atualiza a UI imediatamente (síncrono)
-  saveToDB(); // Persiste em background (assíncrono, fire-and-forget)
+/**
+ * Persiste o estado e atualiza a UI.
+ * @param {Function} [renderFn] - Função de render específica. Se omitida, chama renderAll().
+ */
+async function saveData(renderFn) {
+  if (typeof renderFn === "function") renderFn();
+  else renderAll();
+  // Aguarda confirmação do IndexedDB antes de retornar.
+  // Callers críticos (confirmSettle, confirmDistribute, confirmCashWithdrawal)
+  // devem usar "await saveData(...)" para garantir persistência antes do feedback de sucesso.
+  await saveToDB();
 }
 
 // --- LÓGICA DE NEGÓCIO ---
@@ -427,15 +796,15 @@ function saveData() {
 function updatePrice() {
   const input = document.getElementById("config-price-input");
   const newPrice = parseFloat(input.value);
-  if (newPrice >= 0) {
+  if (newPrice > 0) {
     appState.pricePerUnit = newPrice;
-    saveData();
+    saveData(() => { renderManagerDashboard(); });
     showToast(
       `Preço unitário atualizado para ${formatCurrency(newPrice)}`,
       "success",
     );
   } else {
-    showToast("O preço deve ser um valor positivo.", "error");
+    showToast("O preço deve ser um valor maior que zero.", "error");
   }
 }
 
@@ -446,15 +815,17 @@ function updatePrice() {
  * @param {string} action - Descrição da ação (ex: "Compra", "Distribuição").
  * @param {string} details - Detalhes adicionais.
  */
-function addStockLog(typeKey, amount, action, details) {
+function addStockLog(typeKey, amount, action, details, empId = null) {
   const config = appState.bandConfig[typeKey];
   appState.stockLogs.unshift({
-    id: Date.now(), // Usado como timestamp para ordenação
+    id: nextLogId(), // ID único: timestamp × 1000 + seq (não usar para filtro de data)
+    ts: Date.now(),  // Timestamp puro para filtros de data — retrocompatível com logs antigos
     date: new Date().toLocaleString("pt-BR"),
     item: config.name,
     amount: amount,
     action: action,
     details: details,
+    empId: empId,    // ID do operador envolvido; null em ajustes manuais
   });
 }
 
@@ -472,31 +843,18 @@ function addToStock() {
     return;
   }
 
-  let current = 0;
-  if (type === "sales") current = appState.centralStock;
-  else if (type === "owner") current = appState.stockOwner;
-  else if (type === "dayUser") current = appState.stockDayUser;
-
-  // Prevenção de estoque negativo
-  if (current + amount < 0) {
-    showToast("A correção não pode deixar o estoque negativo.", "error");
-    return;
+  try {
+    StockService.adjust(type, amount);
+    const config = appState.bandConfig[type];
+    showToast(
+      `${amount > 0 ? "Adicionado" : "Corrigido/Removido"} ${Math.abs(amount)} pulseiras de ${config.name} (${config.label}).`,
+      "success",
+    );
+    input.value = "";
+    saveData(() => { renderStockInfo(); });
+  } catch (err) {
+    showToast(err.message, "error");
   }
-
-  if (type === "sales") appState.centralStock += amount;
-  else if (type === "owner") appState.stockOwner += amount;
-  else if (type === "dayUser") appState.stockDayUser += amount;
-
-  const config = appState.bandConfig[type];
-  const action = amount > 0 ? "Entrada Manual" : "Ajuste Manual";
-  addStockLog(type, amount, action, "Via Painel Principal");
-  showToast(
-    `${amount > 0 ? "Adicionado" : "Corrigido/Removido"} ${Math.abs(amount)} pulseiras de ${config.name} (${config.label}).`,
-    "success",
-  );
-
-  input.value = ""; // Limpa o campo
-  saveData();
 }
 
 /**
@@ -504,7 +862,9 @@ function addToStock() {
  */
 function addEmployee() {
   const input = document.getElementById("new-emp-name");
+  const phoneInput = document.getElementById("new-emp-phone");
   const name = input.value.trim();
+
   if (!name) {
     showToast("O nome do funcionário não pode ser vazio.", "warning");
     return;
@@ -519,6 +879,13 @@ function addEmployee() {
     return;
   }
 
+  // Telefone: opcional — se preenchido, exige mínimo 8 dígitos numéricos
+  const rawPhone = phoneInput ? phoneInput.value.trim() : "";
+  if (rawPhone && rawPhone.replace(/\D/g, "").length < 8) {
+    showToast("Telefone inválido. Informe ao menos 8 dígitos ou deixe em branco.", "warning");
+    return;
+  }
+
   const newId =
     appState.employees.length > 0
       ? Math.max(...appState.employees.map((e) => e.id)) + 1
@@ -527,15 +894,17 @@ function addEmployee() {
   appState.employees.push({
     id: newId,
     name: name,
-    phone: "", // Adicionado campo de telefone, vazio por padrão
-    received: 0, // Pulseiras de Venda
-    receivedOwner: 0, // Pulseiras de Proprietário
-    receivedDayUser: 0, // Pulseiras de Day User
-    scheduleDate: undefined, // String de data/hora (para input datetime-local)
-    scheduleTs: undefined, // Timestamp numérico (para ordenação e comparação)
+    phone: rawPhone,
+    received: 0,        // saldo Venda
+    receivedOwner: 0,   // saldo Proprietário
+    receivedDayUser: 0, // saldo Day User
+    scheduleDate: undefined,
+    scheduleTs: undefined,
   });
+
   input.value = "";
-  saveData();
+  if (phoneInput) phoneInput.value = "";
+  saveData(() => { renderManagerDashboard(); renderEmployeeSelects(); renderEmployeeSummary(); });
   showToast(`Funcionário "${name}" adicionado com sucesso!`, "success");
 }
 
@@ -556,32 +925,12 @@ function openDistributeModal() {
     return;
   }
 
-  let currentStock = 0;
-  const config = appState.bandConfig[type];
-
-  if (type === "sales") currentStock = appState.centralStock;
-  else if (type === "owner") currentStock = appState.stockOwner;
-  else if (type === "dayUser") currentStock = appState.stockDayUser;
-
-  if (currentStock < amount) {
-    showToast(
-      `Erro: Estoque de ${config.name} insuficiente (Disponível: ${currentStock}).`,
-      "error",
-    );
-    return;
-  }
-
   const employee = appState.employees.find((e) => e.id === empId);
-  if (!employee) return; // Deve ser impossível se o select for bem preenchido
+  if (!employee) return;
 
+  // Validação de negócio feita pelo StockService dentro de confirmDistribute()
   appState.pendingDistribute = { empId, amount, type, empName: employee.name };
-
-  document.getElementById("modal-dist-amount").innerText = amount;
-  document.getElementById("modal-dist-name").innerText = employee.name;
-  document.getElementById("modal-dist-type-label").innerText =
-    `${config.name} (${config.label})`;
-
-  document.getElementById("distribute-modal").classList.remove("hidden");
+  confirmDistribute();
 }
 
 function closeDistributeModal() {
@@ -592,34 +941,33 @@ function closeDistributeModal() {
 /**
  * Confirma a distribuição de pulseiras, debitando do estoque central e creditando ao funcionário.
  */
-function confirmDistribute() {
+async function confirmDistribute() {
   if (!appState.pendingDistribute) return;
-
-  const { empId, amount, type } = appState.pendingDistribute;
-  const employee = appState.employees.find((e) => e.id === empId);
-  if (!employee) return;
-
-  // Garante que os campos existem para evitar `undefined + number`
-  if (employee.receivedOwner === undefined) employee.receivedOwner = 0;
-  if (employee.receivedDayUser === undefined) employee.receivedDayUser = 0;
-
-  if (type === "sales") {
-    appState.centralStock -= amount;
-    employee.received += amount;
-  } else if (type === "owner") {
-    appState.stockOwner -= amount;
-    employee.receivedOwner += amount;
-  } else if (type === "dayUser") {
-    appState.stockDayUser -= amount;
-    employee.receivedDayUser += amount;
+  if (!_acquireLock()) {
+    showToast("Operação em andamento, aguarde.", "warning");
+    return;
   }
+  const { empId, amount, type } = appState.pendingDistribute;
+  const config = appState.bandConfig[type];
 
-  addStockLog(type, -amount, "Distribuição", `Entregue para ${employee.name}`);
-  document.getElementById("distribute-amount").value = ""; // Limpa o input da tela principal
+  try {
+    const employee = StockService.distribute(type, empId, amount);
 
-  saveData();
-  closeDistributeModal();
-  showToast(`${amount} pulseiras distribuídas para ${employee.name}.`, "success");
+    const distAmountEl = document.getElementById("distribute-amount");
+    const distSelectEl = document.getElementById("distribute-select");
+    if (distAmountEl) distAmountEl.value = "";
+    if (distSelectEl) distSelectEl.value = "";
+
+    appState.pendingDistribute = null;
+    await saveData(() => { renderManagerDashboard(); renderEmployeeSummary(); });
+    showToast(`${amount} pulseiras de ${config.name} distribuídas para ${employee.name}.`, "success");
+  } catch (err) {
+    appState.pendingDistribute = null;
+    console.error("[confirmDistribute]", err);
+    showToast(err.message || "Erro ao registrar a distribuição. Recarregue a página.", "error");
+  } finally {
+    _releaseLock();
+  }
 }
 
 // --- LÓGICA DO MODAL DE ACERTO ---
@@ -640,7 +988,11 @@ function openSettleModal(empId) {
     return;
   }
 
-  appState.currentSettleId = empId; // Salva o ID atual
+  appState.currentSettleId = empId;
+
+  // Snapshot imutável do saldo no momento da abertura do modal.
+  // Usado em confirmSettle() para detectar distribuições concorrentes.
+  appState.currentSettleSnapshot = { sales: recSales, owner: recOwner, dayUser: recDay };
 
   document.getElementById("modal-emp-name").innerText = employee.name;
   document.getElementById("modal-got-sales").innerText = recSales;
@@ -654,11 +1006,24 @@ function openSettleModal(empId) {
   document.getElementById("modal-sold-preview").innerText = "0";
   document.getElementById("modal-pay-preview").innerText = "R$ 0,00";
 
+  // Oculta colunas de tipos onde o funcionário não recebeu nenhuma pulseira
+  const colSales = document.getElementById("settle-col-sales");
+  const colOwner = document.getElementById("settle-col-owner");
+  const colDay   = document.getElementById("settle-col-day");
+  const colGrid  = document.getElementById("settle-cols-grid");
+  if (colSales) colSales.classList.toggle("hidden", recSales === 0);
+  if (colOwner) colOwner.classList.toggle("hidden", recOwner === 0);
+  if (colDay)   colDay.classList.toggle("hidden", recDay === 0);
+  if (colGrid) {
+    const visible = [recSales > 0, recOwner > 0, recDay > 0].filter(Boolean).length;
+    colGrid.className = colGrid.className.replace(/grid-cols-\d/, `grid-cols-${Math.max(1, visible)}`);
+  }
+
   // Lógica de Agendamento no Acerto: mostra/oculta opção de "marcar como concluído"
   const scheduleOption = document.getElementById("modal-settle-schedule-option");
   const scheduleCheckbox = document.getElementById("modal-settle-schedule-check");
 
-  if (employee.scheduleDate) {
+  if (employee.scheduleDate || employee.scheduleTs) {
     scheduleOption.classList.remove("hidden");
     if (scheduleCheckbox) scheduleCheckbox.checked = true; // Marcado por padrão para facilitar
   } else {
@@ -672,6 +1037,7 @@ function openSettleModal(empId) {
 function closeSettleModal() {
   document.getElementById("settle-modal").classList.add("hidden");
   appState.currentSettleId = null;
+  appState.currentSettleSnapshot = null;
 }
 
 /**
@@ -719,85 +1085,80 @@ function calculateModalTotals() {
 /**
  * Confirma o acerto de contas com o funcionário, atualizando saldos e histórico.
  */
-function confirmSettle() {
-  const empId = appState.currentSettleId;
-  const employee = appState.employees.find((e) => e.id === empId);
-  if (!employee) return;
-
-  const retSales =
-    parseInt(document.getElementById("modal-ret-sales").value, 10) || 0;
-  const retOwner =
-    parseInt(document.getElementById("modal-ret-owner").value, 10) || 0;
-  const retDay = parseInt(document.getElementById("modal-ret-day").value, 10) || 0;
-
-  const recSales = employee.received || 0;
-  const recOwner = employee.receivedOwner || 0;
-  const recDay = employee.receivedDayUser || 0;
-
-  // Validação final antes de processar
-  if (
-    retSales < 0 ||
-    retSales > recSales ||
-    retOwner < 0 ||
-    retOwner > recOwner ||
-    retDay < 0 ||
-    retDay > recDay
-  ) {
-    showToast(
-      "Verifique as quantidades de devolução. Não podem ser maiores que o recebido.",
-      "error",
-    );
+async function confirmSettle() {
+  if (!_acquireLock()) {
+    showToast("Operação em andamento, aguarde.", "warning");
     return;
   }
+  try {
+    const empId = appState.currentSettleId;
+    const employee = appState.employees.find((e) => e.id === empId);
+    if (!employee) return; // finally libera o lock
 
-  const soldCount = recSales - retSales;
-  const usedOwner = recOwner - retOwner;
-  const usedDay = recDay - retDay;
-  const moneyDue = soldCount * appState.pricePerUnit;
+    const retSales = parseInt(document.getElementById("modal-ret-sales").value, 10) || 0;
+    const retOwner = parseInt(document.getElementById("modal-ret-owner").value, 10) || 0;
+    const retDay   = parseInt(document.getElementById("modal-ret-day").value, 10)   || 0;
 
-  // As sobras NÃO voltam para o Estoque Central.
-  // Elas permanecem fisicamente com o funcionário para o próximo turno.
-  // As linhas que somavam ao appState.centralStock/Owner/DayUser foram removidas.
+    const snapshot = appState.currentSettleSnapshot ?? {
+      sales:   getEmpBalance(employee, "sales"),
+      owner:   getEmpBalance(employee, "owner"),
+      dayUser: getEmpBalance(employee, "dayUser"),
+    };
+    const returns = { sales: retSales, owner: retOwner, dayUser: retDay };
 
-  appState.totalCash = (appState.totalCash || 0) + moneyDue; // Atualiza Caixa Geral
+    let result;
+    try {
+      result = StockService.settle(employee, snapshot, returns);
+    } catch (err) {
+      showToast(err.message, err.message.includes("alterado") ? "warning" : "error");
+      return; // finally libera o lock
+    }
 
-  const details = `Venda: ${soldCount} | Prop: ${usedOwner} | Day: ${usedDay}`;
+    const { soldCount, moneyDue } = result;
+    const recSales  = snapshot.sales;
+    const recOwner  = snapshot.owner;
+    const recDay    = snapshot.dayUser;
+    const usedOwner = recOwner - retOwner;
+    const usedDay   = recDay   - retDay;
 
-  appState.history.unshift({
-    id: Date.now(), // ID/timestamp para o log
-    date: new Date().toLocaleString("pt-BR"),
-    empName: employee.name,
-    sold: soldCount,
-    details: details,
-    total: moneyDue,
-    // Dados completos para geração de recibo individual
-    recSales,
-    retSales,
-    soldCount,
-    recOwner,
-    retOwner,
-    usedOwner,
-    recDay,
-    retDay,
-    usedDay,
-    pricePerUnit: appState.pricePerUnit,
-  });
+    appState.history.unshift({
+      id: nextLogId(),
+      date: new Date().toLocaleString("pt-BR"),
+      empName: employee.name,
+      sold: soldCount,
+      details: `Venda: ${soldCount} | Prop: ${usedOwner} | Day: ${usedDay}`,
+      total: moneyDue,
+      recSales, retSales, soldCount,
+      recOwner, retOwner, usedOwner,
+      recDay,   retDay,   usedDay,
+      pricePerUnit: appState.pricePerUnit,
+    });
 
-  // Atualiza o saldo do funcionário com o que sobrou (ele continua com essas pulseiras)
-  employee.received = retSales;
-  employee.receivedOwner = retOwner;
-  employee.receivedDayUser = retDay;
+    const scheduleCheckbox = document.getElementById("modal-settle-schedule-check");
+    if ((employee.scheduleDate || employee.scheduleTs) && scheduleCheckbox && scheduleCheckbox.checked) {
+      delete employee.scheduleDate;
+      delete employee.scheduleTs;
+    }
 
-  // Concluir agendamento se selecionado (remove scheduleDate E scheduleTs)
-  const scheduleCheckbox = document.getElementById("modal-settle-schedule-check");
-  if (employee.scheduleDate && scheduleCheckbox && scheduleCheckbox.checked) {
-    delete employee.scheduleDate;
-    delete employee.scheduleTs;
+    // await garante que o IndexedDB confirmou a escrita ANTES de fechar o modal e mostrar sucesso.
+    // Se saveData() lançar (falha total de armazenamento), o catch externo captura e informa o usuário.
+    await saveData(() => { renderManagerDashboard(); renderHistory(); renderEmployeeSummary(); });
+    closeSettleModal();
+    showToast(
+      moneyDue > 0
+        ? `Acerto realizado — cobrar ${formatCurrency(moneyDue)}`
+        : `Acerto com ${employee.name} concluído.`,
+      "success"
+    );
+  } catch (err) {
+    console.error("[confirmSettle] Erro inesperado:", err);
+    showToast(
+      err.message || "Erro ao salvar o acerto. Recarregue a página para restaurar o estado anterior.",
+      "error"
+    );
+  } finally {
+    _releaseLock(); // SEMPRE libera — independente de sucesso, falha ou exceção inesperada
   }
-
-  saveData();
-  closeSettleModal();
-  showToast(`Acerto com ${employee.name} concluído!`, "success");
 }
 
 /**
@@ -826,7 +1187,7 @@ async function removeEmployee(empId) {
     })
   ) {
     appState.employees = appState.employees.filter((e) => e.id !== empId);
-    saveData();
+    saveData(() => { renderManagerDashboard(); renderEmployeeSelects(); renderEmployeeSummary(); });
     showToast("Funcionário removido com sucesso.", "success");
   }
 }
@@ -839,16 +1200,11 @@ async function collectAllFromEmployee(empId) {
   const employee = appState.employees.find((e) => e.id === empId);
   if (!employee) return;
 
-  const totalToCollect =
-    (employee.received || 0) +
-    (employee.receivedOwner || 0) +
-    (employee.receivedDayUser || 0);
+  const totalToCollect = ["sales", "owner", "dayUser"]
+    .reduce((sum, type) => sum + getEmpBalance(employee, type), 0);
 
   if (totalToCollect === 0) {
-    showToast(
-      `${employee.name} não possui nenhuma pulseira para recolher.`,
-      "warning",
-    );
+    showToast(`${employee.name} não possui nenhuma pulseira para recolher.`, "warning");
     return;
   }
 
@@ -858,42 +1214,13 @@ async function collectAllFromEmployee(empId) {
       { type: "warning", title: "Recolher Pulseiras" },
     )
   ) {
-    const toLogSales = employee.received || 0;
-    const toLogOwner = employee.receivedOwner || 0;
-    const toLogDay = employee.receivedDayUser || 0;
-
-    appState.centralStock += toLogSales;
-    appState.stockOwner += toLogOwner;
-    appState.stockDayUser += toLogDay;
-
-    employee.received = 0;
-    employee.receivedOwner = 0;
-    employee.receivedDayUser = 0;
-
-    if (toLogSales > 0)
-      addStockLog(
-        "sales",
-        toLogSales,
-        "Recolhimento",
-        `Devolvido por ${employee.name}`,
-      );
-    if (toLogOwner > 0)
-      addStockLog(
-        "owner",
-        toLogOwner,
-        "Recolhimento",
-        `Devolvido por ${employee.name}`,
-      );
-    if (toLogDay > 0)
-      addStockLog(
-        "dayUser",
-        toLogDay,
-        "Recolhimento",
-        `Devolvido por ${employee.name}`,
-      );
-
-    showToast("Pulseiras recolhidas com sucesso!", "success");
-    saveData();
+    try {
+      StockService.collect(empId);
+      showToast("Pulseiras recolhidas com sucesso!", "success");
+      saveData(() => { renderManagerDashboard(); renderEmployeeSummary(); });
+    } catch (err) {
+      showToast(err.message, "error");
+    }
   }
 }
 
@@ -909,12 +1236,15 @@ function openScheduleModal(empId) {
   appState.currentScheduleId = empId;
   document.getElementById("modal-sched-name").innerText = employee.name;
 
-  const input = document.getElementById("schedule-datetime");
-  if (employee.scheduleDate) {
-    input.value = employee.scheduleDate;
-  } else {
-    input.value = ""; // Limpa o input se não houver agendamento
-  }
+  const datetimeInput = document.getElementById("schedule-datetime");
+  // Usa scheduleTs como fonte de verdade; scheduleDate mantido apenas para compat. legada
+  datetimeInput.value = employee.scheduleTs
+    ? tsToDatetimeLocal(employee.scheduleTs)
+    : (employee.scheduleDate || "");
+
+  // Preenche o telefone atual do funcionário para edição
+  const phoneInput = document.getElementById("schedule-phone");
+  if (phoneInput) phoneInput.value = employee.phone || "";
 
   document.getElementById("schedule-modal").classList.remove("hidden");
 }
@@ -933,26 +1263,37 @@ function closeScheduleModal() {
 function saveSchedule() {
   const empId = appState.currentScheduleId;
   const employee = appState.employees.find((e) => e.id === empId);
-  const dateVal = document.getElementById("schedule-datetime").value;
+  if (!employee) { closeScheduleModal(); return; }
 
-  if (employee) {
-    if (dateVal) {
-      const parsed = parseDatetimeLocal(dateVal);
-      if (!parsed) {
-        showToast("Formato de data/hora inválido. Verifique se está completo.", "error");
-        return;
-      }
-      employee.scheduleDate = dateVal; // String original do input
-      employee.scheduleTs = parsed.ts; // Timestamp para fácil ordenação/comparação
-      showToast(`Agendamento salvo para ${employee.name}.`, "success");
-    } else {
-      // Se o campo for limpo, remove ambos os campos de agendamento
-      delete employee.scheduleDate;
-      delete employee.scheduleTs;
-      showToast(`Agendamento para ${employee.name} removido.`, "success");
-    }
-    saveData();
+  const dateVal = document.getElementById("schedule-datetime").value;
+  const phoneInput = document.getElementById("schedule-phone");
+  const rawPhone = phoneInput ? phoneInput.value.trim() : "";
+
+  // Valida telefone se preenchido
+  if (rawPhone && rawPhone.replace(/\D/g, "").length < 8) {
+    showToast("Telefone inválido. Informe ao menos 8 dígitos ou deixe em branco.", "warning");
+    return;
   }
+
+  // Persiste o telefone se foi alterado no modal
+  employee.phone = rawPhone;
+
+  if (dateVal) {
+    const parsed = parseDatetimeLocal(dateVal);
+    if (!parsed) {
+      showToast("Formato de data/hora inválido. Verifique se está completo.", "error");
+      return;
+    }
+    employee.scheduleTs = parsed.ts;
+    delete employee.scheduleDate; // Não persiste mais scheduleDate — scheduleTs é suficiente
+    showToast(`Agendamento salvo para ${employee.name}.`, "success");
+  } else {
+    delete employee.scheduleDate;
+    delete employee.scheduleTs;
+    showToast(`Agendamento para ${employee.name} removido.`, "success");
+  }
+
+  saveData(() => { renderManagerDashboard(); renderEmployeeSummary(); });
   closeScheduleModal();
 }
 
@@ -962,21 +1303,20 @@ function saveSchedule() {
  */
 function sendWhatsApp(empId) {
   const employee = appState.employees.find((e) => e.id === empId);
-  if (!employee || !employee.scheduleDate) {
+  if (!employee || (!employee.scheduleTs && !employee.scheduleDate)) {
     showToast("Agendamento ou funcionário não encontrado para enviar WhatsApp.", "warning");
     return;
   }
 
-  const parsed = parseDatetimeLocal(employee.scheduleDate);
+  // Usa scheduleTs como fonte primária; scheduleDate mantido apenas para compat. legada
+  const ts = employee.scheduleTs || (employee.scheduleDate ? parseDatetimeLocal(employee.scheduleDate)?.ts : null);
   let dateStr = "data não definida";
   let timeStr = "";
 
-  if (parsed && parsed.dateObj) {
-    dateStr = parsed.dateObj.toLocaleDateString("pt-BR");
-    timeStr = parsed.dateObj.toLocaleTimeString("pt-BR", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+  if (ts) {
+    const d = new Date(ts);
+    dateStr = d.toLocaleDateString("pt-BR");
+    timeStr = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
   }
 
   const message = `Olá ${employee.name}, favor comparecer para acerto de pulseiras dia *${dateStr}* às *${timeStr}*.`;
@@ -986,12 +1326,12 @@ function sendWhatsApp(empId) {
     // Sanitiza o número de telefone (remove caracteres não-numéricos)
     const digits = employee.phone.replace(/\D/g, "");
     if (digits.length >= 8) { // Considera um número válido se tiver pelo menos 8 dígitos (excluindo DDI, incluindo DDD)
-      window.open(`https://wa.me/${digits}?text=${encodedMsg}`, "_blank");
+      window.open(`https://wa.me/${digits}?text=${encodedMsg}`, "_blank", "noopener,noreferrer");
       return;
     }
   }
   // Fallback: abre o composer do WhatsApp sem um número específico
-  window.open(`https://wa.me/?text=${encodedMsg}`, "_blank");
+  window.open(`https://wa.me/?text=${encodedMsg}`, "_blank", "noopener,noreferrer");
   showToast("Abriu o WhatsApp. Lembre-se de selecionar o contato do funcionário.", "info");
 }
 
@@ -1001,7 +1341,7 @@ function sendWhatsApp(empId) {
  */
 async function removeSchedule(empId) {
   const employee = appState.employees.find((e) => e.id === empId);
-  if (!employee || !employee.scheduleDate) return;
+  if (!employee || (!employee.scheduleDate && !employee.scheduleTs)) return;
 
   const confirmed = await showConfirm(
     `Tem certeza que deseja remover o agendamento de ${employee.name}?`,
@@ -1024,7 +1364,7 @@ async function removeSchedule(empId) {
   // Remove imediatamente o agendamento do funcionário e salva o estado
   delete employee.scheduleDate;
   delete employee.scheduleTs;
-  saveData(); // Isso re-renderizará o dashboard e o agendamento sumirá.
+  saveData(() => { renderManagerDashboard(); renderEmployeeSummary(); });
 
   // Gera uma chave única para este evento de remoção para o "Desfazer"
   const undoKey = Date.now() + "_" + empId;
@@ -1042,7 +1382,7 @@ async function removeSchedule(empId) {
     // Restaura os dados do agendamento
     emp.scheduleDate = previous.scheduleDate;
     emp.scheduleTs = previous.scheduleTs;
-    saveData(); // Salva o estado e re-renderiza (o agendamento reaparecerá)
+    saveData(() => { renderManagerDashboard(); renderEmployeeSummary(); }); // reaparece o agendamento
     undone = true; // Marca como desfeito
     pendingScheduleRemovals.delete(undoKey); // Limpa do mapa
     showToast(`Agendamento restaurado para ${emp.name}.`, "success");
@@ -1074,11 +1414,11 @@ async function removeSchedule(empId) {
  * Renderiza todos os componentes da UI que precisam ser atualizados.
  */
 function renderAll() {
-  renderBandOptions(); // Atualiza selects e textos baseados na config
-  renderManagerDashboard(); // Renderiza a tabela principal de funcionários
-  renderEmployeeSelects(); // Atualiza os selects de funcionários (ex: distribuição)
-  renderHistory(); // Renderiza o histórico de acertos
-  renderCharts(); // Renderiza os gráficos
+  renderBandOptions();
+  renderManagerDashboard();
+  renderEmployeeSelects();
+  renderHistory();
+  renderEmployeeSummary();
   const priceInput = document.getElementById("config-price-input");
   if (priceInput) priceInput.value = appState.pricePerUnit;
 }
@@ -1091,10 +1431,9 @@ function renderManagerDashboard() {
 
   // Resumo financeiro
   const totalGross = appState.totalCash || 0;
-  const totalWithdrawn = (appState.cashWithdrawals || []).reduce(
-    (acc, w) => acc + w.amount,
-    0,
-  );
+  const totalWithdrawn = (appState.cashWithdrawals || [])
+    .filter(w => !w.isDeleted)
+    .reduce((acc, w) => acc + w.amount, 0);
   const balance = totalGross - totalWithdrawn;
 
   document.getElementById("total-money-display").innerText =
@@ -1109,34 +1448,33 @@ function renderManagerDashboard() {
 
   const filterScheduledEl = document.getElementById("filter-scheduled");
   const filterScheduled = filterScheduledEl && filterScheduledEl.checked;
-  let employeesToRender = [...appState.employees]; // Cria uma cópia para ordenar/filtrar
+  let employeesToRender = [...appState.employees];
 
-  // Se o filtro "Agendados" estiver ativo, filtra a lista
   if (filterScheduled) {
     employeesToRender = employeesToRender.filter(
-      (e) => e.scheduleTs || e.scheduleDate, // Considera agendado se tiver qualquer um dos campos
+      (e) => e.scheduleTs || e.scheduleDate,
     );
   }
 
-  // Limpa o corpo da tabela antes de renderizar para evitar duplicação ou resíduos
-  while (tbody.firstChild) {
-    tbody.removeChild(tbody.firstChild);
-  }
-
-  // Ordena os funcionários:
-  // 1. Agendados primeiro, ordenados pelo timestamp do agendamento (mais próximo primeiro)
-  // 2. Depois, não agendados, ordenados alfabeticamente pelo nome
+  // Ordena por prioridade operacional:
+  // 1. Com pulseiras pendentes — maior quantidade primeiro
+  // 2. Agendados (sem pendência) — mais próximos primeiro
+  // 3. Acertados — ordem alfabética
   employeesToRender.sort((a, b) => {
-    const aHasSchedule = a.scheduleTs || (a.scheduleDate ? parseDatetimeLocal(a.scheduleDate)?.ts : null);
-    const bHasSchedule = b.scheduleTs || (b.scheduleDate ? parseDatetimeLocal(b.scheduleDate)?.ts : null);
+    const aPending = (a.received || 0) + (a.receivedOwner || 0) + (a.receivedDayUser || 0);
+    const bPending = (b.received || 0) + (b.receivedOwner || 0) + (b.receivedDayUser || 0);
 
-    // Se ambos têm agendamento, ordena por data do agendamento
-    if (aHasSchedule && bHasSchedule) return aHasSchedule - bHasSchedule;
-    // Se 'a' tem agendamento e 'b' não, 'a' vem primeiro
-    if (aHasSchedule && !bHasSchedule) return -1;
-    // Se 'b' tem agendamento e 'a' não, 'b' vem primeiro
-    if (!aHasSchedule && bHasSchedule) return 1;
-    // Se nenhum tem agendamento, ordena por nome
+    if (aPending > 0 && bPending > 0) return bPending - aPending; // mais pulseiras primeiro
+    if (aPending > 0) return -1;
+    if (bPending > 0) return 1;
+
+    const aTs = a.scheduleTs || (a.scheduleDate ? parseDatetimeLocal(a.scheduleDate)?.ts : null);
+    const bTs = b.scheduleTs || (b.scheduleDate ? parseDatetimeLocal(b.scheduleDate)?.ts : null);
+
+    if (aTs && bTs) return aTs - bTs;
+    if (aTs) return -1;
+    if (bTs) return 1;
+
     return a.name.localeCompare(b.name);
   });
 
@@ -1192,23 +1530,42 @@ function renderManagerDashboard() {
       }
     }
 
+    // Telefone sob o nome (se cadastrado)
+    const phoneHtml = emp.phone
+      ? `<div class="text-xs text-gray-400 font-normal mt-0.5"><i class="fa-brands fa-whatsapp text-green-500 mr-1"></i>${escapeHtml(emp.phone)}</div>`
+      : "";
+
+    // Valor estimado de cobrança (pulseiras de venda × preço unitário)
+    const estimatedValue = sales * appState.pricePerUnit;
+    const estimatedHtml = estimatedValue > 0
+      ? `<div class="text-xs font-bold text-green-600 mt-1" title="Estimativa de cobrança (pulseiras de venda)">≈ ${formatCurrency(estimatedValue)}</div>`
+      : "";
+
     const tr = document.createElement("tr");
     tr.className = "hover:bg-gray-50 transition";
     tr.innerHTML = `
-      <td class="px-4 md:px-6 py-4 font-medium text-gray-900">${escapeHtml(emp.name)}</td>
+      <td class="px-4 md:px-6 py-4 font-medium text-gray-900">
+        ${escapeHtml(emp.name)}${phoneHtml}
+      </td>
       <td class="px-4 md:px-6 py-4 text-center text-gray-600 text-sm">
         <div>
           <span class="${cSales} font-bold" title="${appState.bandConfig.sales.name}">V: ${sales}</span> |
           <span class="${cOwner} font-bold" title="${appState.bandConfig.owner.name}">P: ${owner}</span> |
           <span class="${cDay} font-bold" title="${appState.bandConfig.dayUser.name}">D: ${day}</span>
         </div>
+        ${estimatedHtml}
         ${scheduleHtml}
       </td>
       <td class="px-3 md:px-6 py-3 md:py-4">
         <div class="flex flex-wrap justify-center items-center gap-1">
-          <button onclick="openSettleModal(${emp.id})" class="bg-green-600 text-white hover:bg-green-700 px-3 py-1.5 rounded shadow text-sm font-bold transition" title="Realizar Acerto">
-            <i class="fa-solid fa-hand-holding-dollar"></i>
-          </button>
+          ${sales === 0 && owner === 0 && day === 0
+            ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-bold bg-green-50 text-green-600 border border-green-200" title="Sem pulseiras pendentes">
+                <i class="fa-solid fa-circle-check"></i> Acertado
+               </span>`
+            : `<button onclick="openSettleModal(${emp.id})" class="bg-green-600 text-white hover:bg-green-700 px-3 py-1.5 rounded shadow text-sm font-bold transition" title="Realizar Acerto">
+                <i class="fa-solid fa-hand-holding-dollar"></i>
+               </button>`
+          }
           <button onclick="collectAllFromEmployee(${emp.id})" class="text-orange-500 hover:text-orange-700 p-1.5 rounded hover:bg-orange-50 transition" title="Recolher Todas as Pulseiras">
             <i class="fa-solid fa-box-archive"></i>
           </button>
@@ -1229,9 +1586,6 @@ function renderManagerDashboard() {
  * Renderiza as informações de estoque nos cards de resumo.
  */
 function renderStockInfo() {
-  const container = document.getElementById("stock-info-container");
-  if (!container) return;
-
   const threshold = appState.stockAlertThreshold || 0;
 
   const createRow = (key, count, icon) => {
@@ -1249,10 +1603,16 @@ function renderStockInfo() {
     `;
   };
 
-  container.innerHTML =
+  const html =
     createRow("sales", appState.centralStock, "fa-ticket") +
     createRow("owner", appState.stockOwner || 0, "fa-crown") +
     createRow("dayUser", appState.stockDayUser || 0, "fa-umbrella-beach");
+
+  const dashContainer = document.getElementById("stock-info-container");
+  if (dashContainer) dashContainer.innerHTML = html;
+
+  const settingsContainer = document.getElementById("settings-stock-summary");
+  if (settingsContainer) settingsContainer.innerHTML = html;
 }
 
 /**
@@ -1263,9 +1623,9 @@ function renderBandOptions() {
   const addStockSelect = document.getElementById("add-stock-type");
 
   const createOpts = () => `
-    <option value="sales">${appState.bandConfig.sales.name} (${appState.bandConfig.sales.label})</option>
-    <option value="owner">${appState.bandConfig.owner.name} (${appState.bandConfig.owner.label})</option>
-    <option value="dayUser">${appState.bandConfig.dayUser.name} (${appState.bandConfig.dayUser.label})</option>
+    <option value="sales">${escapeHtml(appState.bandConfig.sales.name)} (${escapeHtml(appState.bandConfig.sales.label)})</option>
+    <option value="owner">${escapeHtml(appState.bandConfig.owner.name)} (${escapeHtml(appState.bandConfig.owner.label)})</option>
+    <option value="dayUser">${escapeHtml(appState.bandConfig.dayUser.name)} (${escapeHtml(appState.bandConfig.dayUser.label)})</option>
   `;
 
   const html = createOpts();
@@ -1380,10 +1740,9 @@ function printReport() {
   );
 
   const totalGross = appState.totalCash || 0;
-  const totalWithdrawn = (appState.cashWithdrawals || []).reduce(
-    (acc, w) => acc + w.amount,
-    0,
-  );
+  const totalWithdrawn = (appState.cashWithdrawals || [])
+    .filter(w => !w.isDeleted)
+    .reduce((acc, w) => acc + w.amount, 0);
   const balance = totalGross - totalWithdrawn;
 
   const pendingSales = appState.employees.reduce(
@@ -1569,8 +1928,9 @@ function renderStockHistoryTable() {
       : Date.now();
 
     filteredLogs = appState.stockLogs.filter((log) => {
-      // log.id é o timestamp em addStockLog
-      return log.id >= startDate && log.id <= endDate;
+      // log.ts existe em logs novos; log.id era o timestamp nos logs antigos
+      const t = log.ts ?? log.id;
+      return t >= startDate && t <= endDate;
     });
   }
 
@@ -1581,13 +1941,28 @@ function renderStockHistoryTable() {
     filteredLogs.forEach((log) => {
       const colorClass = log.amount > 0 ? "text-green-600" : "text-red-600";
       const icon = log.amount > 0 ? "+" : "";
+
+      // Badge do operador: resolve nome pelo empId se disponível (logs novos),
+      // mostrando o nome atual do funcionário. Logs antigos exibem apenas details.
+      const empName = log.empId
+        ? (appState.employees.find((e) => e.id === log.empId)?.name ?? null)
+        : null;
+      const empBadge = empName
+        ? `<span class="inline-flex items-center gap-1 text-[10px] font-medium text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100 mt-1">
+             <i class="fa-solid fa-user text-[9px]" aria-hidden="true"></i>${escapeHtml(empName)}
+           </span>`
+        : "";
+
       const tr = document.createElement("tr");
       tr.className = "hover:bg-gray-50 border-b last:border-0";
       tr.innerHTML = `
         <td class="px-4 py-3 text-gray-600 text-sm">${escapeHtml(log.date)}</td>
         <td class="px-4 py-3 font-bold text-gray-800 text-sm">${escapeHtml(log.item)}</td>
         <td class="px-4 py-3 text-gray-600 text-sm">${escapeHtml(log.action)}</td>
-        <td class="px-4 py-3 text-gray-500 text-xs">${escapeHtml(log.details)}</td>
+        <td class="px-4 py-3 text-gray-500 text-xs">
+          ${escapeHtml(log.details)}
+          ${empBadge ? `<div>${empBadge}</div>` : ""}
+        </td>
         <td class="px-4 py-3 text-right font-bold ${colorClass} text-sm">${icon}${log.amount}</td>
       `;
       tbody.appendChild(tr);
@@ -1620,7 +1995,8 @@ function printStockHistory() {
       : Date.now();
 
     filteredLogs = appState.stockLogs.filter((log) => {
-      return log.id >= startDate && log.id <= endDate;
+      const t = log.ts ?? log.id;
+      return t >= startDate && t <= endDate;
     });
 
     const startFormatted = startInput
@@ -1692,15 +2068,26 @@ function printPeriodReport() {
     (log) => log.id >= startDate && log.id <= endDate,
   );
 
+  // Prévia antes de abrir impressão — evita surpresas com período vazio
+  if (filteredLogs.length === 0) {
+    showToast("Nenhum acerto encontrado no período selecionado.", "warning");
+    return;
+  }
+
   const totalSoldPeriod = filteredLogs.reduce((acc, log) => acc + log.sold, 0);
   const totalCashPeriod = filteredLogs.reduce((acc, log) => acc + log.total, 0);
+
+  showToast(
+    `${filteredLogs.length} acerto(s) — ${totalSoldPeriod} pulseiras — ${formatCurrency(totalCashPeriod)}. Abrindo impressão...`,
+    "info",
+  );
 
   document.getElementById("print-title").innerText = "Relatório por Período";
   document.getElementById("print-date").innerText = new Date().toLocaleString(
     "pt-BR",
   );
 
-  let rowsHtml = filteredLogs
+  const rowsHtml = filteredLogs
     .map(
       (log) => `
         <tr>
@@ -1712,10 +2099,6 @@ function printPeriodReport() {
     `,
     )
     .join("");
-
-  if (filteredLogs.length === 0)
-    rowsHtml =
-      '<tr><td colspan="4" class="p-4 text-center text-gray-500">Nenhum registro neste período.</td></tr>';
 
   const htmlContent = `
         <div class="mb-6 bg-gray-100 p-4 rounded border border-gray-300">
@@ -1737,38 +2120,92 @@ function printPeriodReport() {
   window.print();
 }
 
+/** Dispara download de um CSV via Blob URL. */
+function _downloadCSV(csvContent, filename) {
+  var blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  var url  = URL.createObjectURL(blob);
+  var link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 /**
- * Exporta o histórico de acertos para um arquivo CSV.
+ * Exporta o histórico de acertos para CSV.
  */
 function exportHistoryToCSV() {
   if (appState.history.length === 0) {
     showToast("Não há dados no histórico para exportar.", "warning");
     return;
   }
-
-  let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // Adiciona BOM para garantir UTF-8 no Excel
-  csvContent += "Data/Hora;Funcionário;Qtd Vendida;Detalhes;Total (R$)\n";
-
-  appState.history.forEach((log) => {
-    // Remove pipes e quebras de linha para não quebrar a formatação do CSV
-    const detailsClean = log.details ? log.details.replace(/\|/g, "-").replace(/\\n/g, " ") : "";
-    const row = `${log.date};"${log.empName}";${log.sold};"${detailsClean}";${log.total.toFixed(2).replace(".", ",")}`;
-    csvContent += row + "\n";
+  var csv = "﻿Data/Hora;Funcionário;Qtd Vendida;Detalhes;Total (R$)\n";
+  appState.history.forEach(function(log) {
+    var det = log.details ? log.details.replace(/\|/g, "-").replace(/\\n/g, " ") : "";
+    csv += log.date + ";" + '"' + log.empName + '"' + ";" + log.sold + ";" + '"' + det + '"' + ";" + log.total.toFixed(2).replace(".", ",") + "\n";
   });
-
-  const encodedUri = encodeURI(csvContent);
-  const link = document.createElement("a");
-  link.setAttribute("href", encodedUri);
-  link.setAttribute(
-    "download",
-    `historico_vendas_${new Date().toISOString().slice(0, 10)}.csv`,
-  );
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  showToast("Histórico exportado para CSV!", "success");
+  _downloadCSV(csv, "acertos_" + new Date().toISOString().slice(0, 10) + ".csv");
+  showToast("Histórico de acertos exportado!", "success");
 }
 
+/**
+ * Exporta o histórico de retiradas para CSV.
+ */
+function exportWithdrawalsToCSV() {
+  var list = (appState.cashWithdrawals || []).filter(w => !w.isDeleted);
+  if (list.length === 0) {
+    showToast("Não há retiradas ativas para exportar.", "warning");
+    return;
+  }
+  var csv = "﻿Data/Hora;Descrição;Valor (R$)\n";
+  list.slice().reverse().forEach(function(w) {
+    csv += w.date + ";" + '"' + (w.description || "").replace(/"/g, '""') + '"' + ";" + w.amount.toFixed(2).replace(".", ",") + "\n";
+  });
+  _downloadCSV(csv, "retiradas_" + new Date().toISOString().slice(0, 10) + ".csv");
+  showToast("Histórico de retiradas exportado!", "success");
+}
+
+/**
+ * Exporta o extrato de movimentações de estoque para CSV.
+ */
+function exportStockLogsToCSV() {
+  var list = appState.stockLogs || [];
+  if (list.length === 0) {
+    showToast("Não há movimentações de estoque para exportar.", "warning");
+    return;
+  }
+  var csv = "﻿Data/Hora;Item;Ação;Detalhes;Quantidade\n";
+  list.forEach(function(log) {
+    csv += log.date + ";" + '"' + log.item + '"' + ";" + '"' + log.action + '"' + ";" + '"' + (log.details || "").replace(/"/g, '""') + '"' + ";" + log.amount + "\n";
+  });
+  _downloadCSV(csv, "estoque_" + new Date().toISOString().slice(0, 10) + ".csv");
+  showToast("Movimentações de estoque exportadas!", "success");
+}
+
+/**
+ * Exporta a lista de funcionários com situação atual para CSV.
+ */
+function exportEmployeesToCSV() {
+  if (appState.employees.length === 0) {
+    showToast("Nenhum funcionário cadastrado para exportar.", "warning");
+    return;
+  }
+  var nS = appState.bandConfig.sales.name;
+  var nO = appState.bandConfig.owner.name;
+  var nD = appState.bandConfig.dayUser.name;
+  var csv = "﻿Nome;Telefone;" + nS + " (em mãos);" + nO + " (em mãos);" + nD + " (em mãos);Status\n";
+  appState.employees.forEach(function(emp) {
+    var s = emp.received || 0;
+    var o = emp.receivedOwner || 0;
+    var d = emp.receivedDayUser || 0;
+    var status = (s + o + d) === 0 ? "Acertado" : "Pendente";
+    csv += '"' + emp.name + '"' + ";" + '"' + (emp.phone || "") + '"' + ";" + s + ";" + o + ";" + d + ";" + status + "\n";
+  });
+  _downloadCSV(csv, "funcionarios_" + new Date().toISOString().slice(0, 10) + ".csv");
+  showToast("Lista de funcionários exportada!", "success");
+}
 // --- BACKUP E DADOS ---
 
 /**
@@ -1786,6 +2223,8 @@ function exportData() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+  localStorage.setItem("lastBackup", String(Date.now())); // Registra data do último backup
+  sessionStorage.removeItem("_bwShown"); // Permite que o aviso reapareça na próxima sessão se necessário
   showToast("Backup dos dados realizado com sucesso!", "success");
 }
 
@@ -1805,29 +2244,37 @@ function importData(input) {
       const data = JSON.parse(e.target.result);
       // Validação de estrutura e tipos para evitar corrupção de estado ou injeção
       if (data.centralStock !== undefined && Array.isArray(data.employees) && data.bandConfig) {
-        // Sanitização básica: Reconstrói o objeto com os campos esperados apenas
-        appState.centralStock = Number(data.centralStock) || 0;
-        appState.totalCash = Number(data.totalCash) || 0;
-        appState.employees = data.employees.map(emp => ({
+        // Reconstrói o objeto restaurando TODOS os campos do backup
+        appState.centralStock        = Number(data.centralStock)        || 0;
+        appState.stockOwner          = Number(data.stockOwner)          || 0;
+        appState.stockDayUser        = Number(data.stockDayUser)        || 0;
+        appState.totalCash           = Number(data.totalCash)           || 0;
+        appState.pricePerUnit        = Number(data.pricePerUnit)        || 15.0;
+        appState.stockAlertThreshold = Number(data.stockAlertThreshold) >= 0
+                                         ? Number(data.stockAlertThreshold) : 20;
+        appState.employees    = data.employees.map(emp => ({
           ...emp,
-          name: escapeHtml(emp.name) // Garante que nomes importados sejam tratados
+          name: String(emp.name || "").trim(),
         }));
-        appState.history = Array.isArray(data.history) ? data.history : [];
-        appState.bandConfig = data.bandConfig;
+        appState.history         = Array.isArray(data.history)         ? data.history         : [];
+        appState.stockLogs       = Array.isArray(data.stockLogs)       ? data.stockLogs       : [];
+        appState.cashWithdrawals = Array.isArray(data.cashWithdrawals) ? data.cashWithdrawals : [];
+        appState.bandConfig      = data.bandConfig;
+        // Preserva senha salva — não sobrescreve com valor do backup externo
+        if (data.systemPassword) appState.systemPassword = data.systemPassword;
 
-        // Após carregar, aplicar migração de timestamps se necessário (para compatibilidade)
+        // Migração de timestamps e campos opcionais
         appState.employees.forEach((emp) => {
-            if (emp && emp.scheduleDate && emp.scheduleTs === undefined) {
-                const dtParsed = parseDatetimeLocal(emp.scheduleDate);
-                if (dtParsed) emp.scheduleTs = dtParsed.ts;
-            }
-            if (emp && emp.phone === undefined) {
-                emp.phone = "";
-            }
+          if (emp && emp.scheduleDate && !emp.scheduleTs) {
+            const dtParsed = parseDatetimeLocal(emp.scheduleDate);
+            if (dtParsed) emp.scheduleTs = dtParsed.ts;
+          }
+          if (emp && emp.phone === undefined) emp.phone = "";
         });
-        await saveToDB(); // Persiste os dados importados no IndexedDB
+
+        await saveToDB();
         showToast("Backup restaurado com sucesso! Recarregando a página...", "success");
-        setTimeout(() => location.reload(), 1500); // Recarrega para aplicar o novo estado
+        setTimeout(() => location.reload(), 1500);
       } else {
         showToast("Arquivo de backup inválido. Formato inesperado.", "error");
       }
@@ -1844,6 +2291,32 @@ function importData(input) {
  * Reseta o sistema, apagando todos os dados. Requer confirmação.
  */
 async function resetSystem() {
+  const hasData = appState.history.length > 0 || appState.employees.length > 0 ||
+    appState.centralStock > 0 || appState.totalCash > 0;
+
+  // Se há dados sem backup recente, oferece baixar antes de destruir
+  if (hasData) {
+    const lastBackup = parseInt(localStorage.getItem("lastBackup") || "0", 10);
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    const backupRecente = lastBackup > 0 && (Date.now() - lastBackup) < ONE_DAY_MS;
+
+    if (!backupRecente) {
+      const baixar = await showConfirm(
+        "Você não tem um backup recente. Recomendamos salvar os dados antes de zerar. Deseja baixar o backup agora?",
+        {
+          type: "warning",
+          title: "Backup Recomendado",
+          confirmText: "Baixar Backup",
+          cancelText: "Zerar sem backup",
+        },
+      );
+      if (baixar) {
+        exportData();
+        return; // O gerente pode clicar em "Zerar Tudo" novamente após o download
+      }
+    }
+  }
+
   if (
     await showConfirm(
       "ATENÇÃO: Isso apagará TODOS os dados do sistema e o histórico! Esta ação é irreversível. Tem certeza?",
@@ -1857,14 +2330,15 @@ async function resetSystem() {
   ) {
     if (db) {
       try {
-        await db.clear(DB_STORE); // Limpa a object store
+        await db.clear(DB_STORE);
       } catch (err) {
         console.error("[IndexedDB] Falha ao apagar dados:", err);
       }
     }
-    localStorage.removeItem(STORAGE_KEY); // Remove legados (se houver)
-    localStorage.removeItem(STORAGE_KEY + "_emergency"); // Remove fallback (se houver)
-    location.reload(); // Recarrega a página para iniciar com um estado limpo
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STORAGE_KEY + "_emergency");
+    localStorage.removeItem("lastBackup"); // Limpa o registro de backup junto com os dados
+    location.reload();
   }
 }
 
@@ -1922,7 +2396,7 @@ function showToast(
 
   let actionHtml = "";
   if (actionText && typeof actionCallback === "function") {
-    actionHtml = `<button class="ml-2 text-sm px-2 py-1 bg-gray-100 rounded hover:bg-gray-200" id="toast-action-btn">${escapeHtml(actionText)}</button>`;
+    actionHtml = `<button class="toast-action-btn ml-2 text-sm px-2 py-1 bg-gray-100 rounded hover:bg-gray-200">${escapeHtml(actionText)}</button>`;
   }
 
   toast.innerHTML = `
@@ -1938,7 +2412,7 @@ function showToast(
   container.appendChild(toast);
 
   if (actionText && typeof actionCallback === "function") {
-    const btn = toast.querySelector("#toast-action-btn");
+    const btn = toast.querySelector(".toast-action-btn");
     if (btn) {
       btn.addEventListener("click", (e) => {
         e.stopPropagation(); // Previne que o clique feche outros toasts
@@ -2174,19 +2648,55 @@ function closeConfigModal() {
   document.getElementById("config-modal").classList.add("hidden");
 }
 
+/**
+ * Altera a senha do sistema. Valida senha atual, nova senha e confirmação.
+ */
+async function changePassword() {
+  const current  = document.getElementById("pwd-current").value;
+  const next     = document.getElementById("pwd-new").value.trim();
+  const confirm  = document.getElementById("pwd-confirm").value.trim();
+
+  if (current !== (appState.systemPassword || SYSTEM_PASSWORD)) {
+    showToast("Senha atual incorreta.", "error");
+    return;
+  }
+  if (!next || next.length < 4) {
+    showToast("A nova senha deve ter ao menos 4 caracteres.", "warning");
+    return;
+  }
+  if (next !== confirm) {
+    showToast("Confirmação não coincide com a nova senha.", "error");
+    return;
+  }
+
+  appState.systemPassword = next;
+  await saveToDB();
+  document.getElementById("pwd-current").value = "";
+  document.getElementById("pwd-new").value     = "";
+  document.getElementById("pwd-confirm").value = "";
+  showToast("Senha alterada com sucesso!", "success");
+}
+
 function saveConfig() {
   const keys = ["sales", "owner", "dayUser"];
+
+  // Valida todos os campos antes de salvar qualquer coisa
+  for (const key of keys) {
+    const name = document.getElementById(`cfg-name-${key}`).value.trim();
+    const label = document.getElementById(`cfg-label-${key}`).value.trim();
+    if (!name || !label) {
+      showToast("Nome e rótulo de cada tipo de pulseira não podem ser vazios.", "error");
+      return;
+    }
+  }
+
+  // Aplica após validação completa
   keys.forEach((key) => {
-    appState.bandConfig[key].name = document.getElementById(
-      `cfg-name-${key}`,
-    ).value;
-    appState.bandConfig[key].label = document.getElementById(
-      `cfg-label-${key}`,
-    ).value;
-    appState.bandConfig[key].color = document.getElementById(
-      `cfg-color-${key}`,
-    ).value;
+    appState.bandConfig[key].name  = document.getElementById(`cfg-name-${key}`).value.trim();
+    appState.bandConfig[key].label = document.getElementById(`cfg-label-${key}`).value.trim();
+    appState.bandConfig[key].color = document.getElementById(`cfg-color-${key}`).value;
   });
+
   saveData();
   closeConfigModal();
   showToast("Configurações de pulseira salvas com sucesso!", "success");
@@ -2232,110 +2742,135 @@ function closeWithdrawalHistoryModal() {
  */
 function renderWithdrawalHistory() {
   const tbody = document.getElementById("withdrawal-history-tbody");
-  const withdrawals = appState.cashWithdrawals || [];
+  const all = appState.cashWithdrawals || [];
   tbody.innerHTML = "";
 
-  if (withdrawals.length === 0) {
+  const active  = all.filter(w => !w.isDeleted);
+  const deleted = all.filter(w =>  w.isDeleted);
+
+  if (all.length === 0) {
     tbody.innerHTML =
       '<tr><td colspan="4" class="text-center py-8 text-gray-400 text-sm">' +
       '<i class="fa-solid fa-inbox text-2xl block mb-2 mx-auto"></i>' +
       "Nenhuma retirada registrada.</td></tr>";
-    document.getElementById("withdrawal-total-display").innerText =
-      formatCurrency(0);
+    document.getElementById("withdrawal-total-display").innerText = formatCurrency(0);
     return;
   }
 
-  // Exibe do mais recente para o mais antigo
-  const sorted = [...withdrawals].reverse();
+  // Entradas ativas — mais recentes primeiro
+  const activeRows = [...active].reverse().map((w) => `
+    <tr class="hover:bg-gray-50 border-b text-sm transition">
+      <td class="px-4 py-3 text-gray-500 whitespace-nowrap">${escapeHtml(w.date)}</td>
+      <td class="px-4 py-3 text-gray-700">${escapeHtml(w.description)}</td>
+      <td class="px-4 py-3 text-right font-bold text-red-600 whitespace-nowrap">${formatCurrency(w.amount)}</td>
+      <td class="px-3 py-3 text-center">
+        <button
+          onclick="deleteWithdrawal(${w.id})"
+          class="text-gray-300 hover:text-red-500 transition"
+          title="Estornar esta retirada"
+        >
+          <i class="fa-solid fa-trash text-xs"></i>
+        </button>
+      </td>
+    </tr>`).join("");
 
-  tbody.innerHTML = sorted
-    .map(
-      (w) => `
-      <tr class="hover:bg-gray-50 border-b text-sm transition">
-        <td class="px-4 py-3 text-gray-500 whitespace-nowrap">${escapeHtml(w.date)}</td>
-        <td class="px-4 py-3 text-gray-700">${escapeHtml(w.description)}</td>
-        <td class="px-4 py-3 text-right font-bold text-red-600 whitespace-nowrap">${formatCurrency(w.amount)}</td>
-        <td class="px-3 py-3 text-center">
-          <button
-            onclick="deleteWithdrawal(${w.id})"
-            class="text-gray-300 hover:text-red-500 transition"
-            title="Remover esta retirada"
-          >
-            <i class="fa-solid fa-trash text-xs"></i>
-          </button>
-        </td>
-      </tr>`,
-    )
-    .join("");
+  // Entradas estornadas — trilha de auditoria
+  const deletedRows = [...deleted].reverse().map((w) => `
+    <tr class="border-b text-sm bg-gray-50/80">
+      <td class="px-4 py-3 text-gray-400 whitespace-nowrap line-through">${escapeHtml(w.date)}</td>
+      <td class="px-4 py-3 text-gray-400 line-through">${escapeHtml(w.description)}</td>
+      <td class="px-4 py-3 text-right text-gray-400 line-through whitespace-nowrap">${formatCurrency(w.amount)}</td>
+      <td class="px-3 py-3 text-center">
+        <span class="inline-flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded whitespace-nowrap">
+          <i class="fa-solid fa-rotate-left text-[9px]"></i>
+          Estornado em ${escapeHtml(w.deletedAt ?? "—")}
+        </span>
+      </td>
+    </tr>`).join("");
 
-  const total = withdrawals.reduce((acc, w) => acc + w.amount, 0);
-  document.getElementById("withdrawal-total-display").innerText =
-    formatCurrency(total);
+  tbody.innerHTML = activeRows + deletedRows;
+
+  // Total considera apenas entradas ativas
+  const total = active.reduce((acc, w) => acc + w.amount, 0);
+  document.getElementById("withdrawal-total-display").innerText = formatCurrency(total);
 }
 
 /**
  * Exclui uma retirada do caixa após confirmação.
  */
 async function deleteWithdrawal(id) {
-  const w = (appState.cashWithdrawals || []).find((w) => w.id === id);
+  const w = (appState.cashWithdrawals || []).find((w) => w.id === id && !w.isDeleted);
   if (!w) return;
 
   if (
     !(await showConfirm(
-      `Remover a retirada de ${formatCurrency(w.amount)} (${escapeHtml(w.description)})? O valor voltará ao saldo do caixa.`,
-      { type: "warning", title: "Remover Retirada" },
+      `Estornar a retirada de ${formatCurrency(w.amount)} (${escapeHtml(w.description)})? O registro ficará visível no histórico como estornado para fins de auditoria.`,
+      { type: "warning", title: "Estornar Retirada" },
     ))
   )
     return;
 
-  appState.cashWithdrawals = appState.cashWithdrawals.filter(
-    (withdrawal) => withdrawal.id !== id,
+  // Soft delete: preserva o registro original para auditoria.
+  // O cálculo de saldo exclui entradas com isDeleted = true.
+  appState.cashWithdrawals = appState.cashWithdrawals.map((withdrawal) =>
+    withdrawal.id === id
+      ? { ...withdrawal, isDeleted: true, deletedAt: new Date().toLocaleString("pt-BR") }
+      : withdrawal
   );
-  saveData();
+
+  await saveData(() => { renderManagerDashboard(); });
   renderWithdrawalHistory();
-  showToast("Retirada removida e saldo ajustado.", "success");
+  showToast("Retirada estornada. Registro mantido no histórico para auditoria.", "success");
 }
 
 /**
  * Confirma e registra uma nova retirada do caixa.
  */
-function confirmCashWithdrawal() {
-  const amount = parseFloat(document.getElementById("withdrawal-amount").value);
-  const desc = document.getElementById("withdrawal-desc").value.trim();
-
-  if (isNaN(amount) || amount <= 0) {
-    showToast("Informe um valor válido e positivo para a retirada.", "error");
+async function confirmCashWithdrawal() {
+  if (!_acquireLock()) {
+    showToast("Operação em andamento, aguarde.", "warning");
     return;
   }
+  try {
+    const amount = parseFloat(document.getElementById("withdrawal-amount").value);
+    const desc = document.getElementById("withdrawal-desc").value.trim();
 
-  const totalWithdrawn = (appState.cashWithdrawals || []).reduce(
-    (acc, w) => acc + w.amount,
-    0,
-  );
-  const balance = (appState.totalCash || 0) - totalWithdrawn;
+    if (isNaN(amount) || amount <= 0) {
+      showToast("Informe um valor válido e positivo para a retirada.", "error");
+      return; // finally libera o lock
+    }
 
-  if (amount > balance) {
-    showToast(
-      `O valor da retirada (${formatCurrency(amount)}) não pode ser maior que o saldo disponível (${formatCurrency(balance)}).`,
-      "error",
-    );
-    return;
+    // Exclui entradas marcadas como deletadas do cálculo de saldo (BUG-006)
+    const totalWithdrawn = (appState.cashWithdrawals || [])
+      .filter(w => !w.isDeleted)
+      .reduce((acc, w) => acc + w.amount, 0);
+    const balance = (appState.totalCash || 0) - totalWithdrawn;
+
+    if (amount > balance) {
+      showToast(
+        `O valor da retirada (${formatCurrency(amount)}) não pode ser maior que o saldo disponível (${formatCurrency(balance)}).`,
+        "error",
+      );
+      return; // finally libera o lock
+    }
+
+    if (!appState.cashWithdrawals) appState.cashWithdrawals = [];
+    appState.cashWithdrawals.push({
+      id: nextLogId(),
+      date: new Date().toLocaleString("pt-BR"),
+      amount: amount,
+      description: desc || "Retirada",
+    });
+
+    closeCashWithdrawalModal();
+    await saveData(() => { renderManagerDashboard(); });
+    showToast(`Retirada de ${formatCurrency(amount)} registrada com sucesso!`, "success");
+  } catch (err) {
+    console.error("[confirmCashWithdrawal] Erro inesperado:", err);
+    showToast(err.message || "Erro ao registrar retirada. Recarregue a página.", "error");
+  } finally {
+    _releaseLock();
   }
-
-  if (!appState.cashWithdrawals) appState.cashWithdrawals = [];
-  appState.cashWithdrawals.push({
-    id: Date.now(),
-    date: new Date().toLocaleString("pt-BR"),
-    amount: amount,
-    description: desc || "Retirada",
-  });
-
-  closeCashWithdrawalModal();
-  saveData();
-  showToast(
-    `Retirada de ${formatCurrency(amount)} registrada com sucesso!`,
-    "success",
-  );
 }
 
 // --- RECIBO INDIVIDUAL POR ACERTO ---
@@ -2476,17 +3011,19 @@ function renderCharts() {
     });
   }
 
-  // --- Gráfico 2: Evolução do caixa ao longo do tempo ---
-  const cashHistory = [...appState.history].reverse(); // do mais antigo ao mais recente
+  // --- Gráfico 2: Saldo real do caixa ao longo do tempo (acertos − retiradas) ---
+  // Constrói linha do tempo unificada de acertos (+ receita) e retiradas (- saída)
+  const cashEvents = [
+    ...appState.history.map(h => ({ ts: h.id, amount: h.total, label: h.date.split(",")[0] })),
+    ...(appState.cashWithdrawals || []).map(w => ({ ts: w.id, amount: -w.amount, label: w.date.split(",")[0] })),
+  ].sort((a, b) => a.ts - b.ts); // cronológico
+
   let running = 0;
-  const cashPoints = cashHistory.map((log) => {
-    running += log.total;
+  const cashPoints = cashEvents.map(e => {
+    running += e.amount;
     return parseFloat(running.toFixed(2));
   });
-  const cashLabels = cashHistory.map((log) => {
-    const parts = log.date.split(",");
-    return parts[0]; // apenas a data
-  });
+  const cashLabels = cashEvents.map(e => e.label);
 
   const ctxCash = document.getElementById("chart-cash");
   if (ctxCash) {
@@ -2527,24 +3064,161 @@ function renderCharts() {
 
 // --- ALERTA DE ESTOQUE ---
 
+// Timer para debounce do alerta de estoque (evita save a cada tecla)
+let _stockThresholdTimer = null;
+
 /**
  * Atualiza o limite de alerta de estoque.
+ * Salva apenas 600ms após o último keystroke (debounce).
  */
 function updateStockAlertThreshold() {
-  const input = document.getElementById("stock-alert-threshold");
-  const val = parseInt(input.value, 10);
-  if (!isNaN(val) && val >= 0) {
-    appState.stockAlertThreshold = val;
-    saveData();
-    showToast("Limite de alerta de estoque atualizado!", "success");
-  } else {
-    showToast("Informe um valor numérico positivo para o limite de alerta.", "error");
-  }
+  clearTimeout(_stockThresholdTimer);
+  _stockThresholdTimer = setTimeout(() => {
+    const input = document.getElementById("stock-alert-threshold");
+    const val = parseInt(input.value, 10);
+    if (!isNaN(val) && val >= 0) {
+      appState.stockAlertThreshold = val;
+      saveData(() => renderStockInfo());
+      showToast("Limite de alerta de estoque atualizado!", "success");
+    } else {
+      showToast("Informe um valor numérico positivo para o limite de alerta.", "error");
+    }
+  }, 600);
 }
 
 // Iniciar App: Adicionamos um listener para garantir que o DOM carregou antes de rodar
 document.addEventListener("DOMContentLoaded", init);
 
+// =====================================================================
+// NAVEGAÇÃO POR ABAS
+// =====================================================================
 
+/**
+ * Exibe a aba selecionada e oculta as demais.
+ * @param {string} name - 'dashboard' | 'reports' | 'settings'
+ */
+/**
+ * Atalho contextual do card "Estoque Central" no Dashboard.
+ * Abre a aba Configurações e rola até a seção de estoque,
+ * evitando que o usuário precise procurar o campo na página.
+ */
+function goToStockSettings() {
+  showTab("settings");
+  // requestAnimationFrame garante que a aba já está visível antes do scroll
+  requestAnimationFrame(() => {
+    const section = document.getElementById("settings-stock-section");
+    if (section) {
+      section.scrollIntoView({ behavior: "smooth", block: "start" });
+      // Destaque visual temporário para orientar o olhar do usuário
+      section.style.transition = "box-shadow 0.3s ease";
+      section.style.boxShadow  = "0 0 0 2px #818cf8";
+      setTimeout(() => { section.style.boxShadow = ""; }, 1800);
+    }
+  });
+}
 
+function showTab(name) {
+  // Oculta todos os conteúdos de aba
+  document.querySelectorAll(".tab-content").forEach(function(el) {
+    el.classList.add("hidden");
+  });
 
+  // Remove estado ativo de todos os botões de aba
+  document.querySelectorAll(".tab-nav-btn").forEach(function(btn) {
+    btn.classList.remove("tab-active");
+    btn.setAttribute("aria-selected", "false");
+  });
+
+  // Exibe a aba solicitada
+  var tab = document.getElementById("tab-" + name);
+  if (tab) tab.classList.remove("hidden");
+
+  // Ativa o botão correspondente
+  var btn = document.querySelector(".tab-nav-btn[data-tab=\"" + name + "\"]");
+  if (btn) {
+    btn.classList.add("tab-active");
+    btn.setAttribute("aria-selected", "true");
+  }
+
+  // Ao entrar em Relatórios, renderiza os gráficos com dimensões corretas
+  if (name === "reports") {
+    renderCharts();
+    renderHistory();
+  }
+
+  // Ao entrar em Configurações, garante que os inputs reflitam o estado atual
+  if (name === "settings") {
+    var priceInput = document.getElementById("config-price-input");
+    if (priceInput) priceInput.value = appState.pricePerUnit;
+    var thresholdInput = document.getElementById("stock-alert-threshold");
+    if (thresholdInput) thresholdInput.value = appState.stockAlertThreshold;
+    renderStockInfo();
+    renderBandOptions();
+  }
+}
+
+// =====================================================================
+// MODAL — ADICIONAR FUNCIONÁRIO
+// =====================================================================
+
+/**
+ * Abre o modal de adição de funcionário com os campos limpos.
+ */
+function openAddEmployeeModal() {
+  var nameInput = document.getElementById("new-emp-name");
+  var phoneInput = document.getElementById("new-emp-phone");
+  if (nameInput) nameInput.value = "";
+  if (phoneInput) phoneInput.value = "";
+  var modal = document.getElementById("add-employee-modal");
+  if (modal) modal.classList.remove("hidden");
+  if (nameInput) setTimeout(function() { nameInput.focus(); }, 50);
+}
+
+/**
+ * Fecha o modal de adição de funcionário.
+ */
+function closeAddEmployeeModal() {
+  var modal = document.getElementById("add-employee-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+/**
+ * Adiciona o funcionário e fecha o modal apenas em caso de sucesso.
+ * Verifica se um novo funcionário foi de fato inserido antes de fechar.
+ */
+function addEmployeeFromModal() {
+  var prevCount = appState.employees.length;
+  addEmployee();
+  if (appState.employees.length > prevCount) {
+    closeAddEmployeeModal();
+  }
+}
+
+// =====================================================================
+// CARD DE EQUIPE — contagem dinâmica
+// =====================================================================
+
+/**
+ * Atualiza os contadores do card "Equipe" no Dashboard.
+ */
+function renderEmployeeSummary() {
+  var countEl     = document.getElementById("employee-count-display");
+  var pendingEl   = document.getElementById("employee-pending-display");
+  var scheduledEl = document.getElementById("employee-scheduled-display");
+
+  if (countEl) countEl.textContent = appState.employees.length;
+
+  if (pendingEl) {
+    var pendingCount = appState.employees.filter(function(e) {
+      return (e.received || 0) + (e.receivedOwner || 0) + (e.receivedDayUser || 0) > 0;
+    }).length;
+    pendingEl.textContent = pendingCount;
+  }
+
+  if (scheduledEl) {
+    var scheduledCount = appState.employees.filter(function(e) {
+      return e.scheduleDate || e.scheduleTs;
+    }).length;
+    scheduledEl.textContent = scheduledCount;
+  }
+}
