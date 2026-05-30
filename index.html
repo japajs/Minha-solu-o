@@ -113,31 +113,37 @@
                 <!-- ====== TAB NAVIGATION ====== -->
                 <div class="bg-white border-b border-gray-200">
                     <div class="container mx-auto px-4">
-                        <nav class="flex gap-1" role="tablist" aria-label="Seções do sistema">
+                        <nav class="flex gap-1 overflow-x-auto" role="tablist" aria-label="Seções do sistema">
                             <button
+                                id="tab-btn-dashboard"
                                 class="tab-nav-btn tab-active"
                                 data-tab="dashboard"
                                 onclick="showTab('dashboard')"
                                 role="tab"
                                 aria-selected="true"
+                                aria-controls="tab-dashboard"
                             >
                                 <i class="fa-solid fa-gauge-high mr-1.5"></i>Dashboard
                             </button>
                             <button
+                                id="tab-btn-reports"
                                 class="tab-nav-btn"
                                 data-tab="reports"
                                 onclick="showTab('reports')"
                                 role="tab"
                                 aria-selected="false"
+                                aria-controls="tab-reports"
                             >
                                 <i class="fa-solid fa-chart-bar mr-1.5"></i>Relatórios
                             </button>
                             <button
+                                id="tab-btn-settings"
                                 class="tab-nav-btn"
                                 data-tab="settings"
                                 onclick="showTab('settings')"
                                 role="tab"
                                 aria-selected="false"
+                                aria-controls="tab-settings"
                             >
                                 <i class="fa-solid fa-gear mr-1.5"></i>Configurações
                             </button>
@@ -148,7 +154,7 @@
                 <!-- ====================================================== -->
                 <!-- TAB: DASHBOARD                                          -->
                 <!-- ====================================================== -->
-                <div id="tab-dashboard" class="tab-content container mx-auto px-4 py-6 space-y-5">
+                <div id="tab-dashboard" class="tab-content container mx-auto px-4 py-6 space-y-5" role="tabpanel" aria-labelledby="tab-btn-dashboard" tabindex="0">
 
                     <!-- KPI Cards -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -325,14 +331,14 @@
                 <!-- ====================================================== -->
                 <!-- TAB: RELATÓRIOS                                         -->
                 <!-- ====================================================== -->
-                <div id="tab-reports" class="tab-content hidden container mx-auto px-4 py-6">
+                <div id="tab-reports" class="tab-content hidden container mx-auto px-4 py-6" role="tabpanel" aria-labelledby="tab-btn-reports" tabindex="0">
 
                     <div class="mb-6">
                         <h2 class="text-lg font-bold text-gray-900">Relatórios</h2>
                         <p class="text-sm text-gray-500 mt-0.5">Gere, imprima e exporte relatórios do sistema.</p>
                     </div>
 
-                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-3xl mb-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl mb-6">
 
                         <!-- Fechamento Geral -->
                         <div class="content-card p-5">
@@ -520,7 +526,7 @@
                 <!-- ====================================================== -->
                 <!-- TAB: CONFIGURAÇÕES                                      -->
                 <!-- ====================================================== -->
-                <div id="tab-settings" class="tab-content hidden container mx-auto px-4 py-6">
+                <div id="tab-settings" class="tab-content hidden container mx-auto px-4 py-6" role="tabpanel" aria-labelledby="tab-btn-settings" tabindex="0">
 
                     <div class="mb-6">
                         <h2 class="text-lg font-bold text-gray-900">Configurações</h2>
@@ -536,12 +542,12 @@
                             </div>
                             <div class="p-5 divide-y divide-gray-100">
 
-                                <div class="flex items-center justify-between gap-4 pb-4">
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4">
                                     <div>
                                         <p class="text-sm font-medium text-gray-700">Preço por Pulseira (Venda)</p>
                                         <p class="text-xs text-gray-400 mt-0.5">Valor base para calcular o total nos acertos.</p>
                                     </div>
-                                    <div class="flex items-center gap-2 flex-shrink-0">
+                                    <div class="flex items-center gap-2">
                                         <span class="text-sm text-gray-500 font-medium">R$</span>
                                         <input
                                             type="number"
@@ -558,12 +564,12 @@
                                     </div>
                                 </div>
 
-                                <div class="flex items-center justify-between gap-4 pt-4">
+                                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-4">
                                     <div>
                                         <p class="text-sm font-medium text-gray-700">Alerta de Estoque Baixo</p>
                                         <p class="text-xs text-gray-400 mt-0.5">Exibe aviso pulsante quando o estoque atingir este limite.</p>
                                     </div>
-                                    <div class="flex items-center gap-2 flex-shrink-0">
+                                    <div class="flex items-center gap-2">
                                         <input
                                             type="number"
                                             id="stock-alert-threshold"
@@ -752,7 +758,7 @@
             id="confirm-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-60 hidden flex items-center justify-center z-[200] p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" tabindex="-1">
                 <div class="text-center mb-5">
                     <div id="confirm-icon-wrap" class="mx-auto w-12 h-12 rounded-full flex items-center justify-center mb-3">
                         <i id="confirm-icon-i" class="fa-solid text-xl"></i>
@@ -772,10 +778,10 @@
             id="withdrawal-history-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg transform transition-all scale-100 max-h-[90vh] flex flex-col">
+            <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg transform transition-all scale-100 max-h-[90vh] flex flex-col" role="dialog" aria-modal="true" aria-labelledby="withdrawal-history-title" tabindex="-1">
                 <div class="flex justify-between items-center px-6 py-4 border-b">
-                    <h3 class="text-lg font-bold text-gray-800">
-                        <i class="fa-solid fa-clock-rotate-left text-red-500 mr-2"></i>Histórico de Retiradas
+                    <h3 id="withdrawal-history-title" class="text-lg font-bold text-gray-800">
+                        <i class="fa-solid fa-clock-rotate-left text-red-500 mr-2" aria-hidden="true"></i>Histórico de Retiradas
                     </h3>
                     <button onclick="closeWithdrawalHistoryModal()" class="text-gray-400 hover:text-gray-600 transition">
                         <i class="fa-solid fa-xmark text-xl"></i>
@@ -809,10 +815,10 @@
             id="cash-withdrawal-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100 border-t-4 border-red-500">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100 border-t-4 border-red-500" role="dialog" aria-modal="true" aria-labelledby="cash-withdrawal-title" tabindex="-1">
                 <div class="flex justify-between items-center mb-5 border-b pb-3">
-                    <h3 class="text-lg font-bold text-gray-800">
-                        <i class="fa-solid fa-arrow-up-from-bracket text-red-500 mr-2"></i>Registrar Retirada
+                    <h3 id="cash-withdrawal-title" class="text-lg font-bold text-gray-800">
+                        <i class="fa-solid fa-arrow-up-from-bracket text-red-500 mr-2" aria-hidden="true"></i>Registrar Retirada
                     </h3>
                     <button onclick="closeCashWithdrawalModal()" class="text-gray-400 hover:text-gray-600 transition">
                         <i class="fa-solid fa-xmark text-xl"></i>
@@ -874,10 +880,10 @@
             id="settle-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md transform transition-all scale-100 max-h-[90vh] overflow-y-auto">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md transform transition-all scale-100 max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="settle-modal-title" tabindex="-1">
                 <div class="flex justify-between items-center mb-4 border-b pb-2">
-                    <h3 class="text-xl font-bold text-gray-800">
-                        <i class="fa-solid fa-hand-holding-dollar text-green-600 mr-2"></i>Acerto de Contas
+                    <h3 id="settle-modal-title" class="text-xl font-bold text-gray-800">
+                        <i class="fa-solid fa-hand-holding-dollar text-green-600 mr-2" aria-hidden="true"></i>Acerto de Contas
                     </h3>
                     <button onclick="closeSettleModal()" class="text-gray-400 hover:text-gray-600 transition">
                         <i class="fa-solid fa-xmark text-xl"></i>
@@ -888,7 +894,7 @@
                         <p class="text-sm text-gray-500 uppercase font-bold">Funcionário</p>
                         <p class="text-lg font-bold text-gray-800" id="modal-emp-name">Nome</p>
                     </div>
-                    <div id="settle-cols-grid" class="grid grid-cols-3 gap-2 text-center">
+                    <div id="settle-cols-grid" class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-center">
                         <div id="settle-col-sales" class="bg-blue-50 p-2 rounded border border-blue-200">
                             <span class="block text-xs font-bold text-blue-700 mb-1">VENDA <span class="text-green-600">R$</span></span>
                             <span class="text-xs text-gray-500">Pegou: <b id="modal-got-sales">0</b></span>
@@ -938,12 +944,12 @@
             id="distribute-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100 border-t-4 border-indigo-600">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100 border-t-4 border-indigo-600" role="dialog" aria-modal="true" aria-labelledby="distribute-modal-title" tabindex="-1">
                 <div class="text-center mb-6">
                     <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-indigo-100 mb-4">
-                        <i class="fa-solid fa-hand-holding-hand text-indigo-600 text-xl"></i>
+                        <i class="fa-solid fa-hand-holding-hand text-indigo-600 text-xl" aria-hidden="true"></i>
                     </div>
-                    <h3 class="text-lg leading-6 font-bold text-gray-900">Confirmar Entrega?</h3>
+                    <h3 id="distribute-modal-title" class="text-lg leading-6 font-bold text-gray-900">Confirmar Entrega?</h3>
                     <div class="mt-2 px-2 py-3 bg-gray-50 rounded-lg border border-gray-200">
                         <p class="text-sm text-gray-500">Você vai entregar:</p>
                         <p class="text-2xl font-bold text-indigo-600 my-1">
@@ -967,10 +973,10 @@
             id="config-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg transform transition-all scale-100 max-h-[90vh] overflow-y-auto">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg transform transition-all scale-100 max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="config-modal-title" tabindex="-1">
                 <div class="flex justify-between items-center mb-4 border-b pb-2">
-                    <h3 class="text-xl font-bold text-gray-800">
-                        <i class="fa-solid fa-palette text-gray-600 mr-2"></i>Configurar Pulseiras
+                    <h3 id="config-modal-title" class="text-xl font-bold text-gray-800">
+                        <i class="fa-solid fa-palette text-gray-600 mr-2" aria-hidden="true"></i>Configurar Pulseiras
                     </h3>
                     <button onclick="closeConfigModal()" class="text-gray-400 hover:text-gray-600 transition">
                         <i class="fa-solid fa-xmark text-xl"></i>
@@ -992,10 +998,10 @@
             id="stock-history-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-4 md:p-6 w-full max-w-4xl transform transition-all scale-100 h-[90vh] flex flex-col">
+            <div class="bg-white rounded-xl shadow-2xl p-4 md:p-6 w-full max-w-4xl transform transition-all scale-100 h-[90vh] flex flex-col" role="dialog" aria-modal="true" aria-labelledby="stock-history-modal-title" tabindex="-1">
                 <div class="flex justify-between items-center mb-4 border-b pb-2">
-                    <h3 class="text-xl font-bold text-gray-800">
-                        <i class="fa-solid fa-list-ul text-blue-600 mr-2"></i>Extrato de Movimentação
+                    <h3 id="stock-history-modal-title" class="text-xl font-bold text-gray-800">
+                        <i class="fa-solid fa-list-ul text-blue-600 mr-2" aria-hidden="true"></i>Extrato de Movimentação
                     </h3>
                     <button onclick="closeStockHistoryModal()" class="text-gray-400 hover:text-gray-600 transition">
                         <i class="fa-solid fa-xmark text-xl"></i>
@@ -1043,12 +1049,12 @@
             id="schedule-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100" role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title" tabindex="-1">
                 <div class="text-center mb-4">
                     <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-orange-100 mb-3">
-                        <i class="fa-solid fa-calendar-clock text-orange-600 text-xl"></i>
+                        <i class="fa-solid fa-calendar-clock text-orange-600 text-xl" aria-hidden="true"></i>
                     </div>
-                    <h3 class="text-lg font-bold text-gray-900">Agendar Acerto</h3>
+                    <h3 id="schedule-modal-title" class="text-lg font-bold text-gray-900">Agendar Acerto</h3>
                     <p class="text-sm text-gray-500">
                         Defina quando <span id="modal-sched-name" class="font-bold text-gray-800"></span> deve comparecer.
                     </p>
@@ -1076,10 +1082,10 @@
             id="add-employee-modal"
             class="fixed inset-0 bg-gray-900 bg-opacity-50 hidden flex items-center justify-center z-50 backdrop-blur-sm transition-opacity duration-300 p-4"
         >
-            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100 border-t-4 border-purple-600">
+            <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100 border-t-4 border-purple-600" role="dialog" aria-modal="true" aria-labelledby="add-employee-modal-title" tabindex="-1">
                 <div class="flex justify-between items-center mb-5 border-b pb-3">
-                    <h3 class="text-lg font-bold text-gray-800">
-                        <i class="fa-solid fa-user-plus text-purple-600 mr-2"></i>Novo Funcionário
+                    <h3 id="add-employee-modal-title" class="text-lg font-bold text-gray-800">
+                        <i class="fa-solid fa-user-plus text-purple-600 mr-2" aria-hidden="true"></i>Novo Funcionário
                     </h3>
                     <button onclick="closeAddEmployeeModal()" class="text-gray-400 hover:text-gray-600 transition">
                         <i class="fa-solid fa-xmark text-xl"></i>
